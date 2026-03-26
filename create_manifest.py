@@ -9,7 +9,7 @@ Usage:
 """
 import json
 import os
-import torchaudio
+import soundfile as sf
 
 DATASETS = [
     {
@@ -41,8 +41,8 @@ def build_manifest(datasets):
                     continue
                 fpath = os.path.join(spk_dir, fname)
                 try:
-                    info = torchaudio.info(fpath)
-                    duration = info.num_frames / info.sample_rate
+                    info = sf.info(fpath)
+                    duration = info.duration
                 except Exception as e:
                     print(f"[WARN] {fpath}: {e}")
                     continue
