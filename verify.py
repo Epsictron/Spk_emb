@@ -77,16 +77,19 @@ def main():
         assert genders.count("female") == 8, f"Expected 8 female samples, got {genders.count('female')}"
     print(f"[OK] SpeakerBatchSampler: {len(batches)} batches, 2M+2F spk x 4 samp = 16/batch, gender balanced")
 
-    # 9. Split
+    # 9. Split (gender-balanced)
     fake_manifest = [
-        {"speaker_id": f"spk{i:03d}", "gender": "male" if i % 2 == 0 else "female"}
-        for i in range(20)
+        {"speaker_id": f"spk{i:03d}", "gender": "male" if i < 50 else "female"}
+        for i in range(100)
     ]
     train_m, val_m = split_manifest(fake_manifest, val_split=0.2)
     train_spks = set(e["speaker_id"] for e in train_m)
     val_spks = set(e["speaker_id"] for e in val_m)
     assert train_spks.isdisjoint(val_spks), "Speaker leak between train/val!"
-    print(f"[OK] Split: {len(train_m)} train, {len(val_m)} val (no speaker overlap)")
+    val_males = sum(1 for e in val_m if e["gender"] == "male")
+    val_females = sum(1 for e in val_m if e["gender"] == "female")
+    assert val_males == val_females, f"Val not gender-balanced: {val_males}M, {val_females}F"
+    print(f"[OK] Split: {len(train_m)} train, {len(val_m)} val ({val_males}M + {val_females}F, no overlap)")
 
     print("\n=== All checks passed ===")
 

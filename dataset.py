@@ -168,20 +168,35 @@ def load_manifest(path):
 
 
 def split_manifest(manifest, val_split=0.1):
-    """Split manifest by speaker so no speaker leaks between train/val."""
+    """Split manifest by speaker, gender-balanced (equal male/female in val)."""
     spk_to_entries = {}
+    spk_to_gender = {}
     for e in manifest:
         spk_to_entries.setdefault(e["speaker_id"], []).append(e)
+        if e["speaker_id"] not in spk_to_gender:
+            spk_to_gender[e["speaker_id"]] = e.get("gender", "").lower()
 
-    speakers = list(spk_to_entries.keys())
-    random.shuffle(speakers)
-    val_count = max(1, int(len(speakers) * val_split))
+    male_spks = [s for s, g in spk_to_gender.items() if g == "male"]
+    female_spks = [s for s, g in spk_to_gender.items() if g == "female"]
 
-    val_spks = set(speakers[:val_count])
+    random.shuffle(male_spks)
+    random.shuffle(female_spks)
+
+    total_spks = len(male_spks) + len(female_spks)
+    val_count = max(2, int(total_spks * val_split))
+    val_per_gender = val_count // 2
+
+    val_males = male_spks[:val_per_gender]
+    val_females = female_spks[:val_per_gender]
+    val_spks = set(val_males + val_females)
+
     train, val = [], []
     for spk, entries in spk_to_entries.items():
         if spk in val_spks:
             val.extend(entries)
         else:
             train.extend(entries)
+
+    print(f"Split: {len(val_males)} male + {len(val_females)} female speakers in val, "
+          f"{len(male_spks) - len(val_males)} male + {len(female_spks) - len(val_females)} female in train")
     return train, val
