@@ -1,0 +1,18 @@
+[
+  {
+    "audio_file_path": "/path/to/audio1.wav",
+    "speaker_id": "spk_001",
+    "gender": "male",
+    "duration": 3.2,
+    "dataset_name": "voxceleb",
+    "language": "english"
+  },
+  {
+    "audio_file_path": "/path/to/audio2.wav",
+    "speaker_id": "spk_002",
+    "gender": "female",
+    "duration": 2.8,
+    "dataset_name": "voxceleb",
+    "language": "english"
+  }
+]
