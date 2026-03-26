@@ -9,6 +9,7 @@ Usage:
 """
 import json
 import os
+from multiprocessing import Pool, cpu_count
 import soundfile as sf
 
 DATASETS = [
@@ -21,41 +22,51 @@ DATASETS = [
 ]
 
 OUTPUT = "data/manifest.json"
+AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg")
+
+
+def process_file(args):
+    fpath, spk_id, ds_name, ds_lang = args
+    try:
+        info = sf.info(fpath)
+        return {
+            "audio_file_path": fpath,
+            "speaker_id": spk_id,
+            "duration": round(info.duration, 3),
+            "dataset_name": ds_name,
+            "language": ds_lang,
+        }
+    except Exception as e:
+        print(f"[WARN] {fpath}: {e}")
+        return None
 
 
 def build_manifest(datasets):
-    manifest = []
+    # Collect all file tasks first
+    tasks = []
     for ds in datasets:
         root = ds["path"]
         if not os.path.isdir(root):
             print(f"[SKIP] {root} not found")
             continue
-
-        for spk_id in sorted(os.listdir(root)):
+        for spk_id in os.listdir(root):
             spk_dir = os.path.join(root, spk_id)
             if not os.path.isdir(spk_dir):
                 continue
+            for fname in os.listdir(spk_dir):
+                if fname.endswith(AUDIO_EXTS):
+                    tasks.append((os.path.join(spk_dir, fname), spk_id, ds["name"], ds["language"]))
 
-            for fname in sorted(os.listdir(spk_dir)):
-                if not fname.endswith((".wav", ".flac", ".mp3", ".ogg")):
-                    continue
-                fpath = os.path.join(spk_dir, fname)
-                try:
-                    info = sf.info(fpath)
-                    duration = info.duration
-                except Exception as e:
-                    print(f"[WARN] {fpath}: {e}")
-                    continue
+    print(f"Found {len(tasks)} files, processing with {cpu_count()} workers...")
 
-                manifest.append({
-                    "audio_file_path": fpath,
-                    "speaker_id": spk_id,
-                    "duration": round(duration, 3),
-                    "dataset_name": ds["name"],
-                    "language": ds["language"],
-                })
+    with Pool(cpu_count()) as pool:
+        results = pool.map(process_file, tasks, chunksize=256)
 
-        print(f"[OK] {ds['name']}: {sum(1 for m in manifest if m['dataset_name'] == ds['name'])} files")
+    manifest = [r for r in results if r is not None]
+
+    for ds in datasets:
+        count = sum(1 for m in manifest if m["dataset_name"] == ds["name"])
+        print(f"[OK] {ds['name']}: {count} files")
 
     return manifest
 
