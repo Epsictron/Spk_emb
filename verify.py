@@ -1,8 +1,8 @@
 """Quick verification that all components work."""
 import json
 import torch
-from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss
-from dataset import SpeakerDataset, GenderBalancedSampler, split_manifest
+from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
+from dataset import SpeakerDataset, GenderBalancedSampler, SpeakerBatchSampler, split_manifest
 
 
 def main():
@@ -48,12 +48,29 @@ def main():
     loss3 = contrastive(emb, labels3)
     print(f"[OK] Contrastive loss: {loss3.item():.4f}")
 
-    # 7. Gender balanced sampler
+    # 7. Combined loss
+    combined = CombinedLoss(cfg["embedding_dim"], num_speakers=10, aam_weight=0.7, proto_weight=0.3)
+    labels4 = torch.tensor([0, 0, 1, 1])
+    loss4 = combined(emb, labels4)
+    assert loss4.item() > 0
+    print(f"[OK] Combined loss (0.7*aam + 0.3*proto): {loss4.item():.4f}")
+
+    # 8. Speaker batch sampler
+    fake_spk_manifest = [
+        {"speaker_id": f"spk{i % 5:03d}", "audio_file_path": f"f{i}.wav"}
+        for i in range(40)
+    ]
+    spk_sampler = SpeakerBatchSampler(fake_spk_manifest, speakers_per_batch=2, samples_per_speaker=4)
+    batches = list(spk_sampler)
+    assert all(len(b) == 8 for b in batches), "Batch size mismatch"
+    print(f"[OK] SpeakerBatchSampler: {len(batches)} batches of {len(batches[0])} samples (2 spk x 4 samp)")
+
+    # 9. Gender balanced sampler
     sampler = GenderBalancedSampler(manifest)
     indices = list(sampler)
     print(f"[OK] GenderBalancedSampler yields {len(indices)} indices")
 
-    # 8. Split
+    # 10. Split
     fake_manifest = [
         {"speaker_id": f"spk{i:03d}", "gender": "male" if i % 2 == 0 else "female"}
         for i in range(20)

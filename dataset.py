@@ -101,6 +101,54 @@ class GenderBalancedSampler(Sampler):
         return self.epoch_size
 
 
+class SpeakerBatchSampler(Sampler):
+    """Samples fixed number of speakers per batch, each with fixed number of utterances.
+
+    batch_size = speakers_per_batch * samples_per_speaker
+    """
+
+    def __init__(self, manifest, speakers_per_batch=8, samples_per_speaker=4):
+        self.speakers_per_batch = speakers_per_batch
+        self.samples_per_speaker = samples_per_speaker
+        self.batch_size = speakers_per_batch * samples_per_speaker
+
+        # Group indices by speaker
+        self.spk_to_indices = {}
+        for i, e in enumerate(manifest):
+            self.spk_to_indices.setdefault(e["speaker_id"], []).append(i)
+
+        # Only keep speakers with enough samples
+        self.speakers = [s for s, idxs in self.spk_to_indices.items()
+                         if len(idxs) >= samples_per_speaker]
+        if len(self.speakers) < speakers_per_batch:
+            # Fallback: allow speakers with fewer samples (will resample with replacement)
+            self.speakers = list(self.spk_to_indices.keys())
+
+        self.num_batches = max(1, len(self.speakers) // speakers_per_batch)
+
+    def __iter__(self):
+        random.shuffle(self.speakers)
+        for batch_idx in range(self.num_batches):
+            batch_spks = self.speakers[batch_idx * self.speakers_per_batch:
+                                       (batch_idx + 1) * self.speakers_per_batch]
+            # Pad if not enough speakers for last batch
+            while len(batch_spks) < self.speakers_per_batch:
+                batch_spks.append(random.choice(self.speakers))
+
+            indices = []
+            for spk in batch_spks:
+                spk_idxs = self.spk_to_indices[spk]
+                if len(spk_idxs) >= self.samples_per_speaker:
+                    chosen = random.sample(spk_idxs, self.samples_per_speaker)
+                else:
+                    chosen = random.choices(spk_idxs, k=self.samples_per_speaker)
+                indices.extend(chosen)
+            yield indices
+
+    def __len__(self):
+        return self.num_batches
+
+
 def load_manifest(path):
     with open(path) as f:
         return json.load(f)

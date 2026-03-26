@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import SpeakerDataset, GenderBalancedSampler, load_manifest, split_manifest
-from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss
+from dataset import SpeakerDataset, GenderBalancedSampler, SpeakerBatchSampler, load_manifest, split_manifest
+from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 
 
 def train(config_path, checkpoint=None):
@@ -35,11 +35,24 @@ def train(config_path, checkpoint=None):
     val_ds.spk2label = train_ds.spk2label
     val_ds.num_speakers = train_ds.num_speakers
 
-    sampler = GenderBalancedSampler(train_manifest) if cfg.get("gender_balanced") else None
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg["batch_size"], sampler=sampler,
-        shuffle=(sampler is None), num_workers=cfg["num_workers"], pin_memory=True
-    )
+    # Sampler: speaker-batch or gender-balanced or default shuffle
+    spk_per_batch = cfg.get("speakers_per_batch")
+    samp_per_spk = cfg.get("samples_per_speaker")
+    use_spk_sampler = spk_per_batch and samp_per_spk
+
+    if use_spk_sampler:
+        batch_sampler = SpeakerBatchSampler(train_manifest, spk_per_batch, samp_per_spk)
+        train_loader = DataLoader(
+            train_ds, batch_sampler=batch_sampler,
+            num_workers=cfg["num_workers"], pin_memory=True
+        )
+        print(f"Using SpeakerBatchSampler: {spk_per_batch} spk/batch x {samp_per_spk} samp/spk = {spk_per_batch * samp_per_spk} batch_size")
+    else:
+        sampler = GenderBalancedSampler(train_manifest) if cfg.get("gender_balanced") else None
+        train_loader = DataLoader(
+            train_ds, batch_size=cfg["batch_size"], sampler=sampler,
+            shuffle=(sampler is None), num_workers=cfg["num_workers"], pin_memory=True
+        )
     val_loader = DataLoader(
         val_ds, batch_size=cfg["batch_size"], shuffle=False,
         num_workers=cfg["num_workers"], pin_memory=True
@@ -59,6 +72,15 @@ def train(config_path, checkpoint=None):
         criterion = PrototypicalLoss().to(device)
     elif loss_type == "contrastive":
         criterion = ContrastiveLoss().to(device)
+    elif loss_type == "combined":
+        criterion = CombinedLoss(
+            cfg["embedding_dim"], train_ds.num_speakers,
+            aam_weight=cfg.get("aam_weight", 0.7),
+            proto_weight=cfg.get("proto_weight", 0.3),
+            margin=cfg.get("aam_margin", 0.2),
+            scale=cfg.get("aam_scale", 30)
+        ).to(device)
+        print(f"Combined loss: aam_weight={cfg.get('aam_weight', 0.7)}, proto_weight={cfg.get('proto_weight', 0.3)}")
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -103,11 +125,12 @@ def train(config_path, checkpoint=None):
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
 
-            # Accuracy for AAM loss
-            if loss_type == "aam":
+            # Accuracy for AAM / combined loss
+            if loss_type in ("aam", "combined"):
                 with torch.no_grad():
+                    w = criterion.weight if loss_type == "aam" else criterion.aam.weight
                     emb_norm = F.normalize(embeddings, dim=1)
-                    w_norm = F.normalize(criterion.weight, dim=1)
+                    w_norm = F.normalize(w, dim=1)
                     preds = F.linear(emb_norm, w_norm).argmax(dim=1)
                     correct += (preds == labels).sum().item()
 
@@ -119,7 +142,7 @@ def train(config_path, checkpoint=None):
         writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
         msg = f"Epoch {epoch}: train_loss={train_loss:.4f}"
 
-        if loss_type == "aam" and total > 0:
+        if loss_type in ("aam", "combined") and total > 0:
             train_acc = correct / total
             writer.add_scalar("train/accuracy", train_acc, epoch)
             msg += f" train_acc={train_acc:.4f}"
@@ -137,9 +160,10 @@ def train(config_path, checkpoint=None):
                 val_loss_sum += loss.item() * labels.size(0)
                 val_total += labels.size(0)
 
-                if loss_type == "aam":
+                if loss_type in ("aam", "combined"):
+                    w = criterion.weight if loss_type == "aam" else criterion.aam.weight
                     emb_norm = F.normalize(embeddings, dim=1)
-                    w_norm = F.normalize(criterion.weight, dim=1)
+                    w_norm = F.normalize(w, dim=1)
                     preds = F.linear(emb_norm, w_norm).argmax(dim=1)
                     val_correct += (preds == labels).sum().item()
 
@@ -147,7 +171,7 @@ def train(config_path, checkpoint=None):
         writer.add_scalar("val/loss", val_loss, epoch)
         msg += f" val_loss={val_loss:.4f}"
 
-        if loss_type == "aam" and val_total > 0:
+        if loss_type in ("aam", "combined") and val_total > 0:
             val_acc = val_correct / val_total
             writer.add_scalar("val/accuracy", val_acc, epoch)
             msg += f" val_acc={val_acc:.4f}"

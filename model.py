@@ -83,3 +83,20 @@ class ContrastiveLoss(nn.Module):
         if valid.sum() == 0:
             return torch.tensor(0.0, device=emb.device, requires_grad=True)
         return loss[valid].mean()
+
+
+class CombinedLoss(nn.Module):
+    """Weighted combination of AAMSoftmax and Prototypical loss."""
+
+    def __init__(self, embedding_dim, num_speakers, aam_weight=0.7, proto_weight=0.3,
+                 margin=0.2, scale=30):
+        super().__init__()
+        self.aam = AAMSoftmaxLoss(embedding_dim, num_speakers, margin, scale)
+        self.proto = PrototypicalLoss()
+        self.aam_weight = aam_weight
+        self.proto_weight = proto_weight
+
+    def forward(self, embeddings, labels):
+        loss_aam = self.aam(embeddings, labels)
+        loss_proto = self.proto(embeddings, labels)
+        return self.aam_weight * loss_aam + self.proto_weight * loss_proto
