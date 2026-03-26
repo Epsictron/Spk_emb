@@ -16,7 +16,7 @@ def main():
     # 2. Manifest format
     with open("data/manifest.json") as f:
         manifest = json.load(f)
-    required = {"audio_file_path", "speaker_id", "gender", "duration", "dataset_name", "language"}
+    required = {"audio_file_path", "speaker_id", "duration", "dataset_name", "language"}
     for entry in manifest:
         assert required.issubset(entry.keys()), f"Missing keys: {required - entry.keys()}"
     print(f"[OK] Manifest has {len(manifest)} entries with all required fields")

@@ -47,16 +47,25 @@ def plot(manifest, output):
     ax.axvline(sum(durations) / len(durations), color="red", linestyle="--", label=f"Mean: {sum(durations)/len(durations):.1f}s")
     ax.legend()
 
-    # 2. Gender distribution
+    # 2. Gender distribution (only if gender info present)
     ax = axes[0, 1]
-    labels, values = zip(*sorted(gender_counts.items()))
-    colors = {"male": "#4C72B0", "female": "#DD8452", "unknown": "#AAAAAA"}
-    bar_colors = [colors.get(l, "#CCCCCC") for l in labels]
-    bars = ax.bar(labels, values, color=bar_colors, edgecolor="white")
-    for bar, v in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01, str(v), ha="center", fontweight="bold")
-    ax.set_title("Gender Distribution")
-    ax.set_ylabel("Utterances")
+    has_gender = any(e.get("gender") for e in manifest)
+    if has_gender:
+        labels, values = zip(*sorted(gender_counts.items()))
+        colors = {"male": "#4C72B0", "female": "#DD8452", "unknown": "#AAAAAA"}
+        bar_colors = [colors.get(l, "#CCCCCC") for l in labels]
+        bars = ax.bar(labels, values, color=bar_colors, edgecolor="white")
+        for bar, v in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01, str(v), ha="center", fontweight="bold")
+        ax.set_title("Gender Distribution")
+        ax.set_ylabel("Utterances")
+    else:
+        top_n = min(20, len(spk_counts))
+        top_spks = spk_counts.most_common(top_n)
+        spk_labels, spk_vals = zip(*reversed(top_spks))
+        ax.barh(spk_labels, spk_vals, color="#DD8452", edgecolor="white")
+        ax.set_xlabel("Utterances")
+        ax.set_title(f"Top {top_n} Speakers by Utterance Count")
 
     # 3. Samples per speaker (top 50 + histogram)
     ax = axes[1, 0]

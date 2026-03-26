@@ -2,7 +2,6 @@
     {
         "audio_file_path": "data/wavs/spk001_001.wav",
         "speaker_id": "spk001",
-        "gender": "male",
         "duration": 4.5,
         "dataset_name": "example_dataset",
         "language": "english"
@@ -10,7 +9,6 @@
     {
         "audio_file_path": "data/wavs/spk002_001.wav",
         "speaker_id": "spk002",
-        "gender": "female",
         "duration": 3.2,
         "dataset_name": "example_dataset",
         "language": "english"
