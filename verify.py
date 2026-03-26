@@ -2,7 +2,7 @@
 import json
 import torch
 from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
-from dataset import SpeakerDataset, GenderBalancedSampler, SpeakerBatchSampler, split_manifest
+from dataset import SpeakerDataset, SpeakerBatchSampler, split_manifest
 
 
 def main():
@@ -76,12 +76,7 @@ def main():
         assert genders.count("female") == 8, f"Expected 8 female samples, got {genders.count('female')}"
     print(f"[OK] SpeakerBatchSampler: {len(batches)} batches, 2M+2F spk x 4 samp = 16/batch, gender balanced")
 
-    # 9. Gender balanced sampler
-    sampler = GenderBalancedSampler(manifest)
-    indices = list(sampler)
-    print(f"[OK] GenderBalancedSampler yields {len(indices)} indices")
-
-    # 10. Split
+    # 9. Split
     fake_manifest = [
         {"speaker_id": f"spk{i:03d}", "gender": "male" if i % 2 == 0 else "female"}
         for i in range(20)

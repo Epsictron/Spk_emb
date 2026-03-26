@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
 
-from dataset import SpeakerDataset, GenderBalancedSampler, SpeakerBatchSampler, load_manifest, split_manifest
+from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_manifest
 from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 
 
@@ -18,7 +18,7 @@ def validate_config(cfg):
     # Required fields
     required = ["manifest_path", "output_dir", "sample_rate", "n_mels", "n_fft",
                 "hop_length", "win_length", "segment_duration", "embedding_dim",
-                "epochs", "lr"]
+                "epochs", "lr", "speakers_per_batch", "samples_per_speaker"]
     for key in required:
         if key not in cfg:
             errors.append(f"Missing required field: '{key}'")
@@ -66,13 +66,14 @@ def validate_config(cfg):
         errors.append(f"feature_type not in {valid_features}")
 
     # Speaker batch sampler
-    spb = cfg.get("speakers_per_batch")
-    sps = cfg.get("samples_per_speaker")
-    if spb is not None and sps is not None:
-        if spb <= 0 or sps <= 0:
-            errors.append("speakers_per_batch and samples_per_speaker must be > 0")
-        if loss_type in ("prototypical", "combined") and sps < 2:
-            errors.append(f"samples_per_speaker should be >= 2 for {loss_type} loss (need multiple samples per speaker)")
+    spb = cfg.get("speakers_per_batch", 0)
+    sps = cfg.get("samples_per_speaker", 0)
+    if spb <= 0 or sps <= 0:
+        errors.append("speakers_per_batch and samples_per_speaker must be > 0")
+    if spb % 2 != 0:
+        errors.append("speakers_per_batch must be even (half male, half female)")
+    if loss_type in ("prototypical", "combined") and sps < 2:
+        errors.append(f"samples_per_speaker should be >= 2 for {loss_type} loss (need multiple samples per speaker)")
 
     # Warmup
     warmup = cfg.get("warmup_epochs", 0)
@@ -133,24 +134,14 @@ def train(config_path, checkpoint=None):
         cfg["hop_length"], cfg["win_length"], spk2label=spk2label
     )
 
-    # Sampler: speaker-batch or gender-balanced or default shuffle
-    spk_per_batch = cfg.get("speakers_per_batch")
-    samp_per_spk = cfg.get("samples_per_speaker")
-    use_spk_sampler = spk_per_batch and samp_per_spk
-
-    if use_spk_sampler:
-        batch_sampler = SpeakerBatchSampler(train_manifest, spk_per_batch, samp_per_spk)
-        train_loader = DataLoader(
-            train_ds, batch_sampler=batch_sampler,
-            num_workers=cfg["num_workers"], pin_memory=True
-        )
-        print(f"Using SpeakerBatchSampler: {spk_per_batch} spk/batch x {samp_per_spk} samp/spk = {spk_per_batch * samp_per_spk} batch_size")
-    else:
-        sampler = GenderBalancedSampler(train_manifest) if cfg.get("gender_balanced") else None
-        train_loader = DataLoader(
-            train_ds, batch_size=cfg["batch_size"], sampler=sampler,
-            shuffle=(sampler is None), num_workers=cfg["num_workers"], pin_memory=True
-        )
+    # Sampler: gender-balanced speaker batch sampler
+    batch_sampler = SpeakerBatchSampler(
+        train_manifest, cfg["speakers_per_batch"], cfg["samples_per_speaker"]
+    )
+    train_loader = DataLoader(
+        train_ds, batch_sampler=batch_sampler,
+        num_workers=cfg["num_workers"], pin_memory=True
+    )
     val_loader = DataLoader(
         val_ds, batch_size=cfg["batch_size"], shuffle=False,
         num_workers=cfg["num_workers"], pin_memory=True

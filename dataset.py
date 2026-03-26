@@ -66,47 +66,6 @@ class SpeakerDataset(Dataset):
         return features, label
 
 
-class GenderBalancedSampler(Sampler):
-    """Ensures equal representation of male and female samples per epoch."""
-
-    def __init__(self, manifest):
-        self.male_indices = [i for i, e in enumerate(manifest) if e.get("gender", "").lower() == "male"]
-        self.female_indices = [i for i, e in enumerate(manifest) if e.get("gender", "").lower() == "female"]
-        self.other_indices = [i for i, e in enumerate(manifest)
-                              if e.get("gender", "").lower() not in ("male", "female")]
-
-        if self.male_indices or self.female_indices:
-            n = max(len(self.male_indices), len(self.female_indices))
-            self.epoch_size = n * 2 + len(self.other_indices)
-            self.balanced = True
-        else:
-            self.epoch_size = len(manifest)
-            self.all_indices = list(range(len(manifest)))
-            self.balanced = False
-
-    def _resample(self, indices, target_len):
-        if len(indices) == 0:
-            return []
-        result = []
-        while len(result) < target_len:
-            random.shuffle(indices)
-            result.extend(indices)
-        return result[:target_len]
-
-    def __iter__(self):
-        if not self.balanced:
-            random.shuffle(self.all_indices)
-            return iter(self.all_indices)
-        n = max(len(self.male_indices), len(self.female_indices))
-        males = self._resample(self.male_indices, n)
-        females = self._resample(self.female_indices, n)
-        combined = males + females + self.other_indices
-        random.shuffle(combined)
-        return iter(combined)
-
-    def __len__(self):
-        return self.epoch_size
-
 
 class SpeakerBatchSampler(Sampler):
     """Samples fixed number of speakers per batch, each with fixed number of utterances.
