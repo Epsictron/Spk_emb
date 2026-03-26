@@ -72,6 +72,33 @@ def process_file(args):
         return None
 
 
+def validate_gender_map(gender_map, gender_file):
+    """Validate gender values and report issues."""
+    valid_genders = {"male", "female", "m", "f"}
+    issues = []
+    for spk_id, gender in gender_map.items():
+        if gender.lower() not in valid_genders:
+            issues.append(f"  Speaker '{spk_id}' has invalid gender: '{gender}'")
+    if issues:
+        print(f"[WARN] Gender file {gender_file} has {len(issues)} invalid entries:")
+        for issue in issues[:10]:
+            print(issue)
+        if len(issues) > 10:
+            print(f"  ... and {len(issues) - 10} more")
+
+    # Normalize m/f to male/female
+    normalized = {}
+    for spk_id, gender in gender_map.items():
+        g = gender.lower()
+        if g == "m":
+            g = "male"
+        elif g == "f":
+            g = "female"
+        if g in ("male", "female"):
+            normalized[spk_id] = g
+    return normalized
+
+
 def build_manifest(datasets):
     tasks = []
     for ds in datasets:
@@ -80,14 +107,25 @@ def build_manifest(datasets):
             print(f"[SKIP] {root} not found")
             continue
 
-        gender_map = load_gender_map(ds.get("gender_file"))
+        gender_file = ds.get("gender_file")
+        gender_map = load_gender_map(gender_file)
         if gender_map:
-            print(f"[OK] Loaded gender info for {len(gender_map)} speakers from {ds['gender_file']}")
+            gender_map = validate_gender_map(gender_map, gender_file)
+            print(f"[OK] Loaded gender info for {len(gender_map)} speakers from {gender_file}")
 
-        for spk_id in os.listdir(root):
+        # Check which speakers in folders are missing from gender file
+        all_spk_dirs = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+        if gender_file and gender_map:
+            missing = [s for s in all_spk_dirs if s not in gender_map]
+            if missing:
+                print(f"[WARN] {ds['name']}: {len(missing)}/{len(all_spk_dirs)} speakers missing gender info")
+                if len(missing) <= 10:
+                    print(f"  Missing: {missing}")
+                else:
+                    print(f"  First 10: {missing[:10]} ...")
+
+        for spk_id in all_spk_dirs:
             spk_dir = os.path.join(root, spk_id)
-            if not os.path.isdir(spk_dir):
-                continue
             gender = gender_map.get(spk_id, "")
             for fname in os.listdir(spk_dir):
                 if fname.endswith(AUDIO_EXTS):
