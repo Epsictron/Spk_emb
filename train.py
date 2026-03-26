@@ -12,6 +12,7 @@ from torch.amp import GradScaler, autocast
 from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_manifest
 from model import SpeakerEncoder
 from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
+from ema_bank import EMAMemoryBank
 
 
 def validate_config(cfg):
@@ -97,6 +98,15 @@ def validate_config(cfg):
     if manifest_path and not os.path.isfile(manifest_path):
         errors.append(f"manifest_path '{manifest_path}' does not exist")
 
+    # EMA config validation
+    ema_alpha = cfg.get("ema_alpha", 0.01)
+    if ema_alpha <= 0 or ema_alpha >= 1:
+        errors.append("ema_alpha must be between 0 and 1 (exclusive)")
+
+    ema_warmup = cfg.get("ema_warmup_steps", 0)
+    if ema_warmup < 0:
+        errors.append("ema_warmup_steps must be >= 0")
+
     if errors:
         print("Config validation errors:")
         for e in errors:
@@ -121,7 +131,7 @@ def run_validation(encoder, criterion, val_loader, device, use_amp, loss_type):
     val_loss_sum, val_total, val_correct = 0.0, 0, 0
 
     with torch.no_grad():
-        for feats, labels in val_loader:
+        for feats, labels, _gender_idx in val_loader:
             feats, labels = feats.to(device), labels.to(device)
             with autocast(device_type="cuda", enabled=use_amp):
                 embeddings = encoder(feats)
@@ -166,6 +176,12 @@ def train(config_path, checkpoint=None):
     all_speakers = sorted(set(e["speaker_id"] for e in manifest))
     spk2label = {s: i for i, s in enumerate(all_speakers)}
     print(f"Total speakers: {len(spk2label)}")
+
+    # Build speaker-to-gender mapping
+    spk2gender = {}
+    for e in manifest:
+        if e["speaker_id"] not in spk2gender:
+            spk2gender[e["speaker_id"]] = e.get("gender", "").lower()
 
     train_ds = SpeakerDataset(
         train_manifest, cfg["sample_rate"], cfg["segment_duration"],
@@ -224,6 +240,10 @@ def train(config_path, checkpoint=None):
     save_interval = cfg.get("save_interval", val_interval)
     grad_clip = cfg.get("grad_clip", 0)
 
+    # EMA config
+    ema_warmup_steps = cfg.get("ema_warmup_steps", 2000)
+    diag_interval = cfg.get("diag_interval", 100)
+
     optimizer = torch.optim.Adam(
         list(encoder.parameters()) + list(criterion.parameters()), lr=cfg["lr"]
     )
@@ -238,6 +258,20 @@ def train(config_path, checkpoint=None):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = GradScaler("cuda", enabled=use_amp)
 
+    # EMA Memory Bank
+    ema_bank = EMAMemoryBank(
+        num_speakers=len(spk2label),
+        embedding_dim=cfg["embedding_dim"],
+        spk2label=spk2label,
+        spk2gender=spk2gender,
+        ema_alpha=cfg.get("ema_alpha", 0.01),
+        cold_speaker_limit=cfg.get("cold_speaker_limit", 500),
+        mix_sample_size=cfg.get("mix_sample_size", 500),
+        diag_score_alpha=cfg.get("diag_score_alpha", 0.05),
+        ratio_thresholds=cfg.get("ratio_thresholds", [0.55, 0.65]),
+        ratio_options=cfg.get("ratio_options", [30, 40, 50, 60, 70]),
+    ).to(device)
+
     start_step = 1
 
     # Resume from checkpoint
@@ -249,6 +283,9 @@ def train(config_path, checkpoint=None):
         optimizer.load_state_dict(ckpt["optimizer"])
         if "scaler" in ckpt and use_amp:
             scaler.load_state_dict(ckpt["scaler"])
+        if "ema_bank" in ckpt:
+            ema_bank.load_state_dict(ckpt["ema_bank"])
+            print("  Restored EMA memory bank")
         start_step = ckpt.get("step", 0) + 1
         print(f"Resuming from step {start_step}")
     else:
@@ -276,11 +313,16 @@ def train(config_path, checkpoint=None):
     print(f"  Val every:           {val_interval} steps")
     print(f"  Save every:          {save_interval} steps")
     print(f"  Log every:           {log_interval} steps")
+    print(f"  Diag every:          {diag_interval} steps (after EMA warmup: {ema_warmup_steps})")
     print(f"  Train samples:       {len(train_manifest)}")
     print(f"  Val samples:         {len(val_manifest)}")
     print(f"  Total speakers:      {len(spk2label)}")
     print(f"  Model params:        {total_params:,}")
     print(f"  Feature:             {cfg['feature_type']}")
+    print(f"  EMA alpha:           {cfg.get('ema_alpha', 0.01)}")
+    print(f"  Cold speaker limit:  {cfg.get('cold_speaker_limit', 500)} steps")
+    print(f"  Mix sample size:     {cfg.get('mix_sample_size', 500)}")
+    print(f"  Ratio options:       {cfg.get('ratio_options', [30, 40, 50, 60, 70])}")
     print("=" * 60 + "\n")
 
     # Training loop (step-based)
@@ -295,8 +337,9 @@ def train(config_path, checkpoint=None):
     step_start = time.time()
 
     for step in range(start_step, max_steps + 1):
-        feats, labels = next(train_iter)
+        feats, labels, gender_indices = next(train_iter)
         feats, labels = feats.to(device), labels.to(device)
+        gender_indices = gender_indices.to(device)
 
         optimizer.zero_grad()
         with autocast(device_type="cuda", enabled=use_amp):
@@ -326,6 +369,34 @@ def train(config_path, checkpoint=None):
                 preds = F.linear(emb_norm, w_norm).argmax(dim=1)
                 running_correct += (preds == labels).sum().item()
 
+        # Update EMA bank every step (cheap operation)
+        with torch.no_grad():
+            ema_bank.update(embeddings.float(), labels, step)
+
+        # Compute and log diagnostics after EMA warmup
+        if step >= ema_warmup_steps and step % diag_interval == 0:
+            with torch.no_grad():
+                diag = ema_bank.compute_diagnostics(embeddings.float(), labels, gender_indices, step)
+
+            # Log raw diagnostic scores
+            writer.add_scalar("diag/m_self", diag["m_self"], step)
+            writer.add_scalar("diag/f_self", diag["f_self"], step)
+            writer.add_scalar("diag/m_mix", diag["m_mix"], step)
+            writer.add_scalar("diag/f_mix", diag["f_mix"], step)
+
+            # Log EMA-smoothed scores
+            writer.add_scalar("diag_ema/m_self", diag["ema_m_self"], step)
+            writer.add_scalar("diag_ema/f_self", diag["ema_f_self"], step)
+            writer.add_scalar("diag_ema/m_mix", diag["ema_m_mix"], step)
+            writer.add_scalar("diag_ema/f_mix", diag["ema_f_mix"], step)
+
+            # Log recommended ratio (NOT applied)
+            writer.add_scalar("diag/recommended_male_ratio", diag["recommended_ratio"], step)
+
+            # Log bank stats
+            bank_stats = ema_bank.get_bank_stats()
+            writer.add_scalar("bank/initialized_speakers", bank_stats["total_initialized"], step)
+
         # Log every N steps
         if step % log_interval == 0:
             avg_loss = running_loss / running_total
@@ -337,6 +408,12 @@ def train(config_path, checkpoint=None):
             if loss_type in ("aam", "combined") and running_total > 0:
                 msg += f" | acc: {running_correct / running_total:.4f}"
             msg += f" | lr: {current_lr:.6f} | {ms_per_step:.0f}ms/step"
+
+            # Add diagnostic info if available
+            if step >= ema_warmup_steps and step % diag_interval == 0:
+                msg += (f" | diag: Ms={diag['ema_m_self']:.3f} Fs={diag['ema_f_self']:.3f}"
+                        f" Mm={diag['ema_m_mix']:.3f} Fm={diag['ema_f_mix']:.3f}"
+                        f" ratio={diag['recommended_ratio']}%M")
 
             print(msg)
             writer.add_scalar("train/loss", avg_loss, step)
@@ -367,6 +444,15 @@ def train(config_path, checkpoint=None):
             print(f"  Val time:     {val_time:.1f}s")
             print(f"  Elapsed:      {elapsed/60:.1f}min | ETA: {remaining/60:.1f}min")
 
+            # Print EMA bank status at validation time
+            bank_stats = ema_bank.get_bank_stats()
+            print(f"  EMA bank:     {bank_stats['total_initialized']}/{bank_stats['total_speakers']} initialized "
+                  f"({bank_stats['male_initialized']}M + {bank_stats['female_initialized']}F)")
+            if step >= ema_warmup_steps:
+                print(f"  Diag scores:  Ms={ema_bank.ema_m_self:.4f} Fs={ema_bank.ema_f_self:.4f} "
+                      f"Mm={ema_bank.ema_m_mix:.4f} Fm={ema_bank.ema_f_mix:.4f}")
+                print(f"  Recommended ratio: {ema_bank.ratio_options[ema_bank.current_ratio_idx]}% male (monitoring only)")
+
             writer.add_scalar("val/loss", val_loss, step)
             if val_acc is not None:
                 writer.add_scalar("val/accuracy", val_acc, step)
@@ -379,6 +465,7 @@ def train(config_path, checkpoint=None):
                     "criterion": criterion.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "val_loss": val_loss,
+                    "ema_bank": ema_bank.state_dict(),
                 }
                 if use_amp:
                     ckpt_dict["scaler"] = scaler.state_dict()
@@ -395,6 +482,7 @@ def train(config_path, checkpoint=None):
                 "criterion": criterion.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "val_loss": best_val_loss,
+                "ema_bank": ema_bank.state_dict(),
             }
             if use_amp:
                 ckpt_dict["scaler"] = scaler.state_dict()

@@ -4,6 +4,7 @@ import torch
 from model import SpeakerEncoder
 from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 from dataset import SpeakerDataset, SpeakerBatchSampler, split_manifest
+from ema_bank import EMAMemoryBank
 
 
 def main():
@@ -90,6 +91,51 @@ def main():
     val_females = sum(1 for e in val_m if e["gender"] == "female")
     assert val_males == val_females, f"Val not gender-balanced: {val_males}M, {val_females}F"
     print(f"[OK] Split: {len(train_m)} train, {len(val_m)} val ({val_males}M + {val_females}F, no overlap)")
+
+    # 10. EMA Memory Bank
+    spk2label = {f"spk{i:03d}": i for i in range(10)}
+    spk2gender = {f"spk{i:03d}": "male" if i < 5 else "female" for i in range(10)}
+    bank = EMAMemoryBank(
+        num_speakers=10, embedding_dim=cfg["embedding_dim"],
+        spk2label=spk2label, spk2gender=spk2gender,
+        ema_alpha=0.01, cold_speaker_limit=500, mix_sample_size=500,
+        diag_score_alpha=0.05
+    )
+
+    # Simulate a few updates
+    fake_emb = torch.randn(8, cfg["embedding_dim"])
+    fake_labels = torch.tensor([0, 0, 1, 1, 5, 5, 6, 6])  # 2 male, 2 female speakers
+    fake_genders = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1])  # 0=male, 1=female
+
+    bank.update(fake_emb, fake_labels, step=1)
+    stats = bank.get_bank_stats()
+    assert stats["total_initialized"] == 4, f"Expected 4 initialized, got {stats['total_initialized']}"
+    assert stats["male_initialized"] == 2
+    assert stats["female_initialized"] == 2
+    print(f"[OK] EMA bank update: {stats['total_initialized']} speakers initialized ({stats['male_initialized']}M + {stats['female_initialized']}F)")
+
+    # Compute diagnostics
+    diag = bank.compute_diagnostics(fake_emb, fake_labels, fake_genders, step=1)
+    assert "m_self" in diag and "f_self" in diag
+    assert "m_mix" in diag and "f_mix" in diag
+    assert "recommended_ratio" in diag
+    assert diag["recommended_ratio"] in [30, 40, 50, 60, 70]
+    print(f"[OK] EMA diagnostics: Ms={diag['m_self']:.4f} Fs={diag['f_self']:.4f} "
+          f"Mm={diag['m_mix']:.4f} Fm={diag['f_mix']:.4f} ratio={diag['recommended_ratio']}%M")
+
+    # Test state_dict / load_state_dict
+    sd = bank.state_dict()
+    bank2 = EMAMemoryBank(
+        num_speakers=10, embedding_dim=cfg["embedding_dim"],
+        spk2label=spk2label, spk2gender=spk2gender,
+    )
+    bank2.load_state_dict(sd)
+    assert bank2.initialized.sum().item() == 4
+    print("[OK] EMA bank save/load state_dict")
+
+    # Test set_ratio on sampler
+    spk_sampler.set_ratio(60)
+    print("[OK] SpeakerBatchSampler.set_ratio(60) works")
 
     print("\n=== All checks passed ===")
 

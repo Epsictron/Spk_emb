@@ -63,7 +63,8 @@ class SpeakerDataset(Dataset):
             raise KeyError(f"Speaker '{spk}' not in spk2label. Available: {len(self.spk2label)} speakers. "
                            f"File: {entry['audio_file_path']}")
         label = self.spk2label[spk]
-        return features, label
+        gender_idx = 0 if entry.get("gender", "").lower() == "male" else 1
+        return features, label, gender_idx
 
 
 
@@ -157,6 +158,15 @@ class SpeakerBatchSampler(Sampler):
                     chosen = random.choices(spk_idxs, k=self.samples_per_speaker)
                 indices.extend(chosen)
             yield indices
+
+    def set_ratio(self, male_ratio):
+        """Set male/female speaker ratio per batch. male_ratio is percentage of male speakers (30-70).
+        For now this is a placeholder - ratio changes are logged but not applied."""
+        self.male_ratio = male_ratio
+        new_half_male = int(self.speakers_per_batch * male_ratio / 100)
+        new_half_female = self.speakers_per_batch - new_half_male
+        print(f"SpeakerBatchSampler: ratio set to {male_ratio}% male "
+              f"({new_half_male} male + {new_half_female} female per batch)")
 
     def __len__(self):
         return self.num_batches
