@@ -111,39 +111,86 @@ class GenderBalancedSampler(Sampler):
 class SpeakerBatchSampler(Sampler):
     """Samples fixed number of speakers per batch, each with fixed number of utterances.
 
+    Gender balanced: half male speakers, half female speakers per batch.
+    No speaker is repeated until all speakers of that gender are used.
+
     batch_size = speakers_per_batch * samples_per_speaker
+    e.g. speakers_per_batch=16, samples_per_speaker=4 -> 8 male * 4 + 8 female * 4 = 64
     """
 
     def __init__(self, manifest, speakers_per_batch=8, samples_per_speaker=4):
         self.speakers_per_batch = speakers_per_batch
         self.samples_per_speaker = samples_per_speaker
         self.batch_size = speakers_per_batch * samples_per_speaker
+        self.half_spk = speakers_per_batch // 2
 
         # Group indices by speaker
         self.spk_to_indices = {}
+        spk_to_gender = {}
         for i, e in enumerate(manifest):
             self.spk_to_indices.setdefault(e["speaker_id"], []).append(i)
+            if e["speaker_id"] not in spk_to_gender:
+                spk_to_gender[e["speaker_id"]] = e.get("gender", "").lower()
 
-        # Only keep speakers with enough samples
-        self.speakers = [s for s, idxs in self.spk_to_indices.items()
-                         if len(idxs) >= samples_per_speaker]
-        if len(self.speakers) < speakers_per_batch:
-            # Fallback: allow speakers with fewer samples (will resample with replacement)
-            self.speakers = list(self.spk_to_indices.keys())
+        # Split speakers by gender
+        self.male_speakers = [s for s, g in spk_to_gender.items() if g == "male"]
+        self.female_speakers = [s for s, g in spk_to_gender.items() if g == "female"]
 
-        self.num_batches = max(1, len(self.speakers) // speakers_per_batch)
+        if not self.male_speakers or not self.female_speakers:
+            raise ValueError(
+                f"Gender balanced batching requires both male and female speakers. "
+                f"Found {len(self.male_speakers)} male, {len(self.female_speakers)} female."
+            )
+
+        # Number of batches = limited by the gender with fewer speakers
+        usable_per_gender = min(len(self.male_speakers), len(self.female_speakers))
+        self.num_batches = max(1, usable_per_gender // self.half_spk)
+        print(f"SpeakerBatchSampler: {len(self.male_speakers)} male, {len(self.female_speakers)} female speakers")
+        print(f"  {self.half_spk} male + {self.half_spk} female per batch x {samples_per_speaker} samples = {self.batch_size}/batch")
+        print(f"  {self.num_batches} batches per epoch")
+
+    def _pick_speakers(self, speaker_list, count):
+        """Pick `count` speakers without replacement. Reshuffles when exhausted."""
+        picked = []
+        pool = list(speaker_list)
+        random.shuffle(pool)
+        idx = 0
+        while len(picked) < count:
+            if idx >= len(pool):
+                # All speakers used, reshuffle
+                random.shuffle(pool)
+                idx = 0
+            picked.append(pool[idx])
+            idx += 1
+        return picked, pool[idx:]  # return remaining for next batch
 
     def __iter__(self):
-        random.shuffle(self.speakers)
-        for batch_idx in range(self.num_batches):
-            batch_spks = self.speakers[batch_idx * self.speakers_per_batch:
-                                       (batch_idx + 1) * self.speakers_per_batch]
-            # Pad if not enough speakers for last batch
-            while len(batch_spks) < self.speakers_per_batch:
-                batch_spks.append(random.choice(self.speakers))
+        male_pool = list(self.male_speakers)
+        female_pool = list(self.female_speakers)
+        random.shuffle(male_pool)
+        random.shuffle(female_pool)
 
+        male_ptr = 0
+        female_ptr = 0
+
+        for _ in range(self.num_batches):
+            # Pick male speakers
+            if male_ptr + self.half_spk > len(male_pool):
+                random.shuffle(male_pool)
+                male_ptr = 0
+            batch_males = male_pool[male_ptr:male_ptr + self.half_spk]
+            male_ptr += self.half_spk
+
+            # Pick female speakers
+            if female_ptr + self.half_spk > len(female_pool):
+                random.shuffle(female_pool)
+                female_ptr = 0
+            batch_females = female_pool[female_ptr:female_ptr + self.half_spk]
+            female_ptr += self.half_spk
+
+            # Gather sample indices
             indices = []
-            for spk in batch_spks:
+            for spk in batch_males + batch_females:
                 spk_idxs = self.spk_to_indices[spk]
                 if len(spk_idxs) >= self.samples_per_speaker:
                     chosen = random.sample(spk_idxs, self.samples_per_speaker)

@@ -55,15 +55,26 @@ def main():
     assert loss4.item() > 0
     print(f"[OK] Combined loss (0.7*aam + 0.3*proto): {loss4.item():.4f}")
 
-    # 8. Speaker batch sampler
-    fake_spk_manifest = [
-        {"speaker_id": f"spk{i % 5:03d}", "audio_file_path": f"f{i}.wav"}
-        for i in range(40)
-    ]
-    spk_sampler = SpeakerBatchSampler(fake_spk_manifest, speakers_per_batch=2, samples_per_speaker=4)
+    # 8. Speaker batch sampler (gender balanced)
+    fake_spk_manifest = []
+    for i in range(10):
+        gender = "male" if i < 5 else "female"
+        for j in range(8):
+            fake_spk_manifest.append({
+                "speaker_id": f"spk{i:03d}", "audio_file_path": f"f{i}_{j}.wav", "gender": gender
+            })
+    # 10 speakers (5M, 5F), 8 samples each, batch = 4 spk (2M+2F) x 4 samp = 16
+    spk_sampler = SpeakerBatchSampler(fake_spk_manifest, speakers_per_batch=4, samples_per_speaker=4)
     batches = list(spk_sampler)
-    assert all(len(b) == 8 for b in batches), "Batch size mismatch"
-    print(f"[OK] SpeakerBatchSampler: {len(batches)} batches of {len(batches[0])} samples (2 spk x 4 samp)")
+    assert all(len(b) == 16 for b in batches), "Batch size mismatch"
+    # Verify no speaker repeated within a batch
+    for batch in batches:
+        spk_ids = [fake_spk_manifest[i]["speaker_id"] for i in batch]
+        assert len(set(spk_ids)) == 4, f"Expected 4 unique speakers, got {len(set(spk_ids))}"
+        genders = [fake_spk_manifest[i]["gender"] for i in batch]
+        assert genders.count("male") == 8, f"Expected 8 male samples, got {genders.count('male')}"
+        assert genders.count("female") == 8, f"Expected 8 female samples, got {genders.count('female')}"
+    print(f"[OK] SpeakerBatchSampler: {len(batches)} batches, 2M+2F spk x 4 samp = 16/batch, gender balanced")
 
     # 9. Gender balanced sampler
     sampler = GenderBalancedSampler(manifest)
