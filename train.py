@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_manifest
 from model import SpeakerEncoder
@@ -189,7 +189,7 @@ def train(config_path, checkpoint=None):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     grad_clip = cfg.get("grad_clip", 0)
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler("cuda", enabled=use_amp)
 
     start_epoch = 1
 
@@ -226,7 +226,7 @@ def train(config_path, checkpoint=None):
             feats, labels = feats.to(device), labels.to(device)
 
             optimizer.zero_grad()
-            with autocast(enabled=use_amp):
+            with autocast(device_type="cuda", enabled=use_amp):
                 embeddings = encoder(feats)
                 loss = criterion(embeddings, labels)
 
@@ -275,7 +275,7 @@ def train(config_path, checkpoint=None):
         with torch.no_grad():
             for feats, labels in val_loader:
                 feats, labels = feats.to(device), labels.to(device)
-                with autocast(enabled=use_amp):
+                with autocast(device_type="cuda", enabled=use_amp):
                     embeddings = encoder(feats)
                     loss = criterion(embeddings, labels)
                 val_loss_sum += loss.item() * labels.size(0)
