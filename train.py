@@ -8,7 +8,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
 
 from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_manifest
-from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
+from model import SpeakerEncoder
+from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 
 
 def validate_config(cfg):

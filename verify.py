@@ -1,7 +1,8 @@
 """Quick verification that all components work."""
 import json
 import torch
-from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
+from model import SpeakerEncoder
+from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 from dataset import SpeakerDataset, SpeakerBatchSampler, split_manifest
 
 
