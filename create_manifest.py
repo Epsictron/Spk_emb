@@ -124,6 +124,9 @@ def build_manifest(datasets):
         for spk_id in all_spk_dirs:
             spk_dir = os.path.join(root, spk_id)
             gender = gender_map.get(spk_id, "")
+            # Skip speakers without gender info when gender file is provided
+            if gender_file and gender_map and not gender:
+                continue
             for fname in os.listdir(spk_dir):
                 if fname.endswith(AUDIO_EXTS):
                     tasks.append((os.path.join(spk_dir, fname), spk_id, ds["name"], ds["language"], gender))
