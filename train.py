@@ -117,18 +117,21 @@ def train(config_path, checkpoint=None):
     train_manifest, val_manifest = split_manifest(manifest, cfg.get("val_split", 0.1))
     print(f"Train: {len(train_manifest)}, Val: {len(val_manifest)}")
 
+    # Build unified speaker-to-label mapping from full manifest
+    all_speakers = sorted(set(e["speaker_id"] for e in manifest))
+    spk2label = {s: i for i, s in enumerate(all_speakers)}
+    print(f"Total speakers: {len(spk2label)}")
+
     train_ds = SpeakerDataset(
         train_manifest, cfg["sample_rate"], cfg["segment_duration"],
         cfg["feature_type"], cfg["n_mels"], cfg["n_fft"],
-        cfg["hop_length"], cfg["win_length"]
+        cfg["hop_length"], cfg["win_length"], spk2label=spk2label
     )
     val_ds = SpeakerDataset(
         val_manifest, cfg["sample_rate"], cfg["segment_duration"],
         cfg["feature_type"], cfg["n_mels"], cfg["n_fft"],
-        cfg["hop_length"], cfg["win_length"]
+        cfg["hop_length"], cfg["win_length"], spk2label=spk2label
     )
-    val_ds.spk2label = train_ds.spk2label
-    val_ds.num_speakers = train_ds.num_speakers
 
     # Sampler: speaker-batch or gender-balanced or default shuffle
     spk_per_batch = cfg.get("speakers_per_batch")

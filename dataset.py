@@ -9,16 +9,19 @@ from torch.utils.data import Dataset, Sampler
 class SpeakerDataset(Dataset):
     def __init__(self, entries, sample_rate=16000, segment_duration=3.0,
                  feature_type="melspectrogram", n_mels=80, n_fft=512,
-                 hop_length=160, win_length=400):
+                 hop_length=160, win_length=400, spk2label=None):
         self.entries = entries
         self.sample_rate = sample_rate
         self.segment_len = int(sample_rate * segment_duration)
         self.feature_type = feature_type
 
-        # Build speaker-to-label mapping
-        speakers = sorted(set(e["speaker_id"] for e in self.entries))
-        self.spk2label = {s: i for i, s in enumerate(speakers)}
-        self.num_speakers = len(speakers)
+        # Use provided mapping or build from entries
+        if spk2label is not None:
+            self.spk2label = spk2label
+        else:
+            speakers = sorted(set(e["speaker_id"] for e in self.entries))
+            self.spk2label = {s: i for i, s in enumerate(speakers)}
+        self.num_speakers = len(self.spk2label)
 
         # Feature extractor
         if feature_type == "mfcc":
@@ -55,7 +58,11 @@ class SpeakerDataset(Dataset):
             wav = torch.nn.functional.pad(wav, (0, self.segment_len - wav.size(0)))
 
         features = self.feature_fn(wav)  # (n_mels, T)
-        label = self.spk2label[entry["speaker_id"]]
+        spk = entry["speaker_id"]
+        if spk not in self.spk2label:
+            raise KeyError(f"Speaker '{spk}' not in spk2label. Available: {len(self.spk2label)} speakers. "
+                           f"File: {entry['audio_file_path']}")
+        label = self.spk2label[spk]
         return features, label
 
 
