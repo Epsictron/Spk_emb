@@ -32,12 +32,10 @@ class AAMSoftmaxLoss(nn.Module):
         self.ce = nn.CrossEntropyLoss()
 
     def forward(self, embeddings, labels):
-        # Normalize
         embeddings = F.normalize(embeddings, dim=1)
         weight = F.normalize(self.weight, dim=1)
         cosine = F.linear(embeddings, weight)
 
-        # Add angular margin to target
         one_hot = F.one_hot(labels, cosine.size(1)).float()
         cosine = cosine - one_hot * self.margin
 
@@ -53,9 +51,35 @@ class PrototypicalLoss(nn.Module):
         unique_labels = labels.unique()
         prototypes = torch.stack([embeddings[labels == l].mean(0) for l in unique_labels])
 
-        # Remap labels to 0..N-1
         label_map = {l.item(): i for i, l in enumerate(unique_labels)}
         mapped = torch.tensor([label_map[l.item()] for l in labels], device=labels.device)
 
-        dists = torch.cdist(embeddings, prototypes)  # (B, N_classes)
+        dists = torch.cdist(embeddings, prototypes)
         return F.cross_entropy(-dists, mapped)
+
+
+class ContrastiveLoss(nn.Module):
+    """Simple contrastive loss using in-batch negatives."""
+
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, emb, labels):
+        emb_norm = F.normalize(emb, dim=1)
+        sim = torch.mm(emb_norm, emb_norm.t()) / self.temperature
+
+        mask = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
+        mask.fill_diagonal_(0)
+
+        exp_sim = torch.exp(sim)
+        exp_sim.fill_diagonal_(0)
+        denom = exp_sim.sum(dim=1, keepdim=True)
+
+        log_prob = sim - torch.log(denom + 1e-9)
+        pos_count = mask.sum(dim=1)
+        loss = -(mask * log_prob).sum(dim=1) / (pos_count + 1e-9)
+        valid = pos_count > 0
+        if valid.sum() == 0:
+            return torch.tensor(0.0, device=emb.device, requires_grad=True)
+        return loss[valid].mean()

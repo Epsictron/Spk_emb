@@ -1,7 +1,7 @@
 """Quick verification that all components work."""
 import json
 import torch
-from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss
+from model import SpeakerEncoder, AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss
 from dataset import SpeakerDataset, GenderBalancedSampler, split_manifest
 
 
@@ -42,12 +42,18 @@ def main():
     assert loss2.item() > 0
     print(f"[OK] Prototypical loss: {loss2.item():.4f}")
 
-    # 6. Gender balanced sampler
+    # 6. Contrastive loss
+    contrastive = ContrastiveLoss()
+    labels3 = torch.tensor([0, 0, 1, 1])
+    loss3 = contrastive(emb, labels3)
+    print(f"[OK] Contrastive loss: {loss3.item():.4f}")
+
+    # 7. Gender balanced sampler
     sampler = GenderBalancedSampler(manifest)
     indices = list(sampler)
     print(f"[OK] GenderBalancedSampler yields {len(indices)} indices")
 
-    # 7. Split
+    # 8. Split
     fake_manifest = [
         {"speaker_id": f"spk{i:03d}", "gender": "male" if i % 2 == 0 else "female"}
         for i in range(20)

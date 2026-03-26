@@ -1,15 +1,16 @@
 import json
 import random
+
 import torch
 import torchaudio
 from torch.utils.data import Dataset, Sampler
 
 
 class SpeakerDataset(Dataset):
-    def __init__(self, manifest, sample_rate=16000, segment_duration=3.0,
+    def __init__(self, entries, sample_rate=16000, segment_duration=3.0,
                  feature_type="melspectrogram", n_mels=80, n_fft=512,
                  hop_length=160, win_length=400):
-        self.entries = manifest
+        self.entries = entries
         self.sample_rate = sample_rate
         self.segment_len = int(sample_rate * segment_duration)
         self.feature_type = feature_type
@@ -40,7 +41,11 @@ class SpeakerDataset(Dataset):
         wav, sr = torchaudio.load(entry["audio_file_path"])
         if sr != self.sample_rate:
             wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
-        wav = wav[0]  # mono
+
+        # mono
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav[0]
 
         # Crop or pad to fixed length
         if wav.size(0) > self.segment_len:
@@ -60,25 +65,37 @@ class GenderBalancedSampler(Sampler):
     def __init__(self, manifest):
         self.male_indices = [i for i, e in enumerate(manifest) if e.get("gender", "").lower() == "male"]
         self.female_indices = [i for i, e in enumerate(manifest) if e.get("gender", "").lower() == "female"]
-        self.epoch_size = 2 * min(len(self.male_indices), len(self.female_indices))
-        if self.epoch_size == 0:
-            # Fallback if gender info missing
+        self.other_indices = [i for i, e in enumerate(manifest)
+                              if e.get("gender", "").lower() not in ("male", "female")]
+
+        if self.male_indices or self.female_indices:
+            n = max(len(self.male_indices), len(self.female_indices))
+            self.epoch_size = n * 2 + len(self.other_indices)
+            self.balanced = True
+        else:
             self.epoch_size = len(manifest)
             self.all_indices = list(range(len(manifest)))
             self.balanced = False
-        else:
-            self.balanced = True
+
+    def _resample(self, indices, target_len):
+        if len(indices) == 0:
+            return []
+        result = []
+        while len(result) < target_len:
+            random.shuffle(indices)
+            result.extend(indices)
+        return result[:target_len]
 
     def __iter__(self):
         if not self.balanced:
             random.shuffle(self.all_indices)
             return iter(self.all_indices)
-        half = self.epoch_size // 2
-        m = random.sample(self.male_indices, half) if half <= len(self.male_indices) else random.choices(self.male_indices, k=half)
-        f = random.sample(self.female_indices, half) if half <= len(self.female_indices) else random.choices(self.female_indices, k=half)
-        indices = m + f
-        random.shuffle(indices)
-        return iter(indices)
+        n = max(len(self.male_indices), len(self.female_indices))
+        males = self._resample(self.male_indices, n)
+        females = self._resample(self.female_indices, n)
+        combined = males + females + self.other_indices
+        random.shuffle(combined)
+        return iter(combined)
 
     def __len__(self):
         return self.epoch_size
