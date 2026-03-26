@@ -119,10 +119,7 @@ def build_manifest(datasets):
             missing = [s for s in all_spk_dirs if s not in gender_map]
             if missing:
                 print(f"[WARN] {ds['name']}: {len(missing)}/{len(all_spk_dirs)} speakers missing gender info")
-                if len(missing) <= 10:
-                    print(f"  Missing: {missing}")
-                else:
-                    print(f"  First 10: {missing[:10]} ...")
+                print(f"  Missing speakers: {missing}")
 
         for spk_id in all_spk_dirs:
             spk_dir = os.path.join(root, spk_id)
