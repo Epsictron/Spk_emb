@@ -130,9 +130,10 @@ def build_manifest(datasets):
             gender = gender_map.get(spk_id, "")
             if not gender:
                 continue
-            for fname in os.listdir(spk_dir):
-                if fname.endswith(AUDIO_EXTS):
-                    tasks.append((os.path.join(spk_dir, fname), spk_id, ds["name"], ds["language"], gender))
+            for dirpath, _, filenames in os.walk(spk_dir):
+                for fname in filenames:
+                    if fname.endswith(AUDIO_EXTS):
+                        tasks.append((os.path.join(dirpath, fname), spk_id, ds["name"], ds["language"], gender))
 
     print(f"Found {len(tasks)} files, processing with {cpu_count()} workers...")
 
