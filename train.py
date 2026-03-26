@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import time
 import torch
@@ -20,7 +21,7 @@ def validate_config(cfg):
     # Required fields
     required = ["manifest_path", "output_dir", "sample_rate", "n_mels", "n_fft",
                 "hop_length", "win_length", "segment_duration", "embedding_dim",
-                "epochs", "lr", "speakers_per_batch", "samples_per_speaker"]
+                "max_steps", "lr", "speakers_per_batch", "samples_per_speaker"]
     for key in required:
         if key not in cfg:
             errors.append(f"Missing required field: '{key}'")
@@ -35,8 +36,8 @@ def validate_config(cfg):
     if cfg.get("embedding_dim", 256) <= 0:
         errors.append("embedding_dim must be > 0")
 
-    if cfg.get("epochs", 50) <= 0:
-        errors.append("epochs must be > 0")
+    if cfg.get("max_steps", 0) <= 0:
+        errors.append("max_steps must be > 0")
 
     lr = cfg.get("lr", 0.001)
     if lr <= 0 or lr > 1:
@@ -44,9 +45,6 @@ def validate_config(cfg):
 
     if cfg.get("val_split", 0.1) <= 0 or cfg.get("val_split", 0.1) >= 1:
         errors.append("val_split must be between 0 and 1 (exclusive)")
-
-    if cfg.get("batch_size", 32) <= 0:
-        errors.append("batch_size must be > 0")
 
     # Loss type
     valid_losses = ("aam", "prototypical", "contrastive", "combined")
@@ -78,11 +76,16 @@ def validate_config(cfg):
         errors.append(f"samples_per_speaker should be >= 2 for {loss_type} loss (need multiple samples per speaker)")
 
     # Warmup
-    warmup = cfg.get("warmup_epochs", 0)
+    warmup = cfg.get("warmup_steps", 0)
     if warmup < 0:
-        errors.append("warmup_epochs must be >= 0")
-    if warmup >= cfg.get("epochs", 50):
-        errors.append("warmup_epochs must be < epochs")
+        errors.append("warmup_steps must be >= 0")
+    if warmup >= cfg.get("max_steps", 1):
+        errors.append("warmup_steps must be < max_steps")
+
+    # Val interval
+    val_interval = cfg.get("val_interval", 2000)
+    if val_interval <= 0:
+        errors.append("val_interval must be > 0")
 
     # Grad clip
     gc = cfg.get("grad_clip", 0)
@@ -101,6 +104,45 @@ def validate_config(cfg):
         raise ValueError(f"Config has {len(errors)} error(s). Fix them and retry.")
 
     print("[OK] Config validated")
+
+
+def infinite_loader(data_loader):
+    """Yields batches forever, restarting the loader when exhausted."""
+    while True:
+        for batch in data_loader:
+            yield batch
+
+
+def run_validation(encoder, criterion, val_loader, device, use_amp, loss_type):
+    """Run validation and return loss, accuracy, time."""
+    val_start = time.time()
+    encoder.eval()
+    criterion.eval()
+    val_loss_sum, val_total, val_correct = 0.0, 0, 0
+
+    with torch.no_grad():
+        for feats, labels in val_loader:
+            feats, labels = feats.to(device), labels.to(device)
+            with autocast(device_type="cuda", enabled=use_amp):
+                embeddings = encoder(feats)
+                loss = criterion(embeddings, labels)
+            val_loss_sum += loss.item() * labels.size(0)
+            val_total += labels.size(0)
+
+            if loss_type in ("aam", "combined"):
+                w = criterion.weight if loss_type == "aam" else criterion.aam.weight
+                emb_norm = F.normalize(embeddings.float(), dim=1)
+                w_norm = F.normalize(w, dim=1)
+                preds = F.linear(emb_norm, w_norm).argmax(dim=1)
+                val_correct += (preds == labels).sum().item()
+
+    encoder.train()
+    criterion.train()
+
+    val_loss = val_loss_sum / max(val_total, 1)
+    val_acc = val_correct / max(val_total, 1) if loss_type in ("aam", "combined") else None
+    val_time = time.time() - val_start
+    return val_loss, val_acc, val_time
 
 
 def train(config_path, checkpoint=None):
@@ -145,8 +187,8 @@ def train(config_path, checkpoint=None):
         num_workers=cfg["num_workers"], pin_memory=True
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg["batch_size"], shuffle=False,
-        num_workers=cfg["num_workers"], pin_memory=True
+        val_ds, batch_size=cfg["speakers_per_batch"] * cfg["samples_per_speaker"],
+        shuffle=False, num_workers=cfg["num_workers"], pin_memory=True
     )
 
     # Model
@@ -175,24 +217,28 @@ def train(config_path, checkpoint=None):
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
+    max_steps = cfg["max_steps"]
+    warmup_steps = cfg.get("warmup_steps", 0)
+    val_interval = cfg.get("val_interval", 2000)
+    log_interval = cfg.get("log_interval", 50)
+    save_interval = cfg.get("save_interval", val_interval)
+    grad_clip = cfg.get("grad_clip", 0)
+
     optimizer = torch.optim.Adam(
         list(encoder.parameters()) + list(criterion.parameters()), lr=cfg["lr"]
     )
 
-    # Schedulers: warmup + cosine
-    warmup_epochs = cfg.get("warmup_epochs", 0)
-    def lr_lambda(epoch):
-        if epoch < warmup_epochs:
-            return (epoch + 1) / (warmup_epochs + 1)
-        progress = (epoch - warmup_epochs) / max(1, cfg["epochs"] - warmup_epochs)
-        return 0.5 * (1 + __import__("math").cos(__import__("math").pi * progress))
+    # LR schedule: linear warmup + cosine decay (step-based)
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return (step + 1) / (warmup_steps + 1)
+        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    grad_clip = cfg.get("grad_clip", 0)
     scaler = GradScaler("cuda", enabled=use_amp)
 
-    start_epoch = 1
+    start_step = 1
 
     # Resume from checkpoint
     if checkpoint and os.path.isfile(checkpoint):
@@ -203,19 +249,17 @@ def train(config_path, checkpoint=None):
         optimizer.load_state_dict(ckpt["optimizer"])
         if "scaler" in ckpt and use_amp:
             scaler.load_state_dict(ckpt["scaler"])
-        start_epoch = ckpt.get("epoch", 0) + 1
-        print(f"Resuming from epoch {start_epoch}")
+        start_step = ckpt.get("step", 0) + 1
+        print(f"Resuming from step {start_step}")
     else:
         print("Starting from scratch")
 
     writer = SummaryWriter(log_dir=os.path.join(cfg["output_dir"], "tb_logs"))
-    log_interval = cfg.get("log_interval", 50)
     best_val_loss = float("inf")
 
     # Print training summary
-    num_train_batches = len(batch_sampler)
-    num_val_batches = len(val_loader)
     batch_size = cfg["speakers_per_batch"] * cfg["samples_per_speaker"]
+    batches_per_cycle = len(batch_sampler)
     total_params = sum(p.numel() for p in encoder.parameters()) + sum(p.numel() for p in criterion.parameters())
 
     print("\n" + "=" * 60)
@@ -223,13 +267,15 @@ def train(config_path, checkpoint=None):
     print("=" * 60)
     print(f"  Device:              {device}")
     print(f"  AMP:                 {use_amp}")
-    print(f"  Epochs:              {cfg['epochs']} (start: {start_epoch})")
+    print(f"  Max steps:           {max_steps} (start: {start_step})")
     print(f"  Loss:                {loss_type}")
-    print(f"  LR:                  {cfg['lr']} (warmup: {warmup_epochs} epochs)")
+    print(f"  LR:                  {cfg['lr']} (warmup: {warmup_steps} steps)")
     print(f"  Grad clip:           {grad_clip if grad_clip > 0 else 'disabled'}")
     print(f"  Batch size:          {batch_size} ({cfg['speakers_per_batch']} spk x {cfg['samples_per_speaker']} samp)")
-    print(f"  Train batches/epoch: {num_train_batches}")
-    print(f"  Val batches/epoch:   {num_val_batches}")
+    print(f"  Batches per cycle:   {batches_per_cycle} (before reshuffling speakers)")
+    print(f"  Val every:           {val_interval} steps")
+    print(f"  Save every:          {save_interval} steps")
+    print(f"  Log every:           {log_interval} steps")
     print(f"  Train samples:       {len(train_manifest)}")
     print(f"  Val samples:         {len(val_manifest)}")
     print(f"  Total speakers:      {len(spk2label)}")
@@ -237,139 +283,128 @@ def train(config_path, checkpoint=None):
     print(f"  Feature:             {cfg['feature_type']}")
     print("=" * 60 + "\n")
 
+    # Training loop (step-based)
+    encoder.train()
+    criterion.train()
+    train_iter = infinite_loader(train_loader)
+
+    running_loss = 0.0
+    running_correct = 0
+    running_total = 0
     training_start = time.time()
+    step_start = time.time()
 
-    for epoch in range(start_epoch, cfg["epochs"] + 1):
-        epoch_start = time.time()
+    for step in range(start_step, max_steps + 1):
+        feats, labels = next(train_iter)
+        feats, labels = feats.to(device), labels.to(device)
 
-        # Train
-        encoder.train()
-        criterion.train()
-        total_loss, correct, total = 0.0, 0, 0
-        batch_times = []
+        optimizer.zero_grad()
+        with autocast(device_type="cuda", enabled=use_amp):
+            embeddings = encoder(feats)
+            loss = criterion(embeddings, labels)
 
-        for step, (feats, labels) in enumerate(train_loader, 1):
-            batch_start = time.time()
-            feats, labels = feats.to(device), labels.to(device)
+        scaler.scale(loss).backward()
 
-            optimizer.zero_grad()
-            with autocast(device_type="cuda", enabled=use_amp):
-                embeddings = encoder(feats)
-                loss = criterion(embeddings, labels)
+        if grad_clip > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                list(encoder.parameters()) + list(criterion.parameters()), grad_clip
+            )
 
-            scaler.scale(loss).backward()
-
-            if grad_clip > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    list(encoder.parameters()) + list(criterion.parameters()), grad_clip
-                )
-
-            scaler.step(optimizer)
-            scaler.update()
-
-            batch_time = time.time() - batch_start
-            batch_times.append(batch_time)
-
-            total_loss += loss.item() * labels.size(0)
-            total += labels.size(0)
-
-            # Accuracy for AAM / combined loss
-            if loss_type in ("aam", "combined"):
-                with torch.no_grad():
-                    w = criterion.weight if loss_type == "aam" else criterion.aam.weight
-                    emb_norm = F.normalize(embeddings.float(), dim=1)
-                    w_norm = F.normalize(w, dim=1)
-                    preds = F.linear(emb_norm, w_norm).argmax(dim=1)
-                    correct += (preds == labels).sum().item()
-
-            if step % log_interval == 0:
-                avg_bt = sum(batch_times[-log_interval:]) / min(log_interval, len(batch_times))
-                print(f"  Step {step}/{num_train_batches} | Loss: {loss.item():.4f} | {avg_bt*1000:.0f}ms/batch")
-
-        train_time = time.time() - epoch_start
-        train_loss = total_loss / total
-        avg_batch_time = sum(batch_times) / len(batch_times)
-        current_lr = optimizer.param_groups[0]["lr"]
-        writer.add_scalar("train/loss", train_loss, epoch)
-        writer.add_scalar("train/lr", current_lr, epoch)
-        writer.add_scalar("train/batch_time_ms", avg_batch_time * 1000, epoch)
-
-        # Validate (runs every epoch, after training)
-        val_start = time.time()
-        encoder.eval()
-        criterion.eval()
-        val_loss_sum, val_total, val_correct = 0.0, 0, 0
-
-        with torch.no_grad():
-            for feats, labels in val_loader:
-                feats, labels = feats.to(device), labels.to(device)
-                with autocast(device_type="cuda", enabled=use_amp):
-                    embeddings = encoder(feats)
-                    loss = criterion(embeddings, labels)
-                val_loss_sum += loss.item() * labels.size(0)
-                val_total += labels.size(0)
-
-                if loss_type in ("aam", "combined"):
-                    w = criterion.weight if loss_type == "aam" else criterion.aam.weight
-                    emb_norm = F.normalize(embeddings.float(), dim=1)
-                    w_norm = F.normalize(w, dim=1)
-                    preds = F.linear(emb_norm, w_norm).argmax(dim=1)
-                    val_correct += (preds == labels).sum().item()
-
-        val_time = time.time() - val_start
-        val_loss = val_loss_sum / max(val_total, 1)
-        epoch_time = time.time() - epoch_start
-        elapsed = time.time() - training_start
-        remaining = (elapsed / (epoch - start_epoch + 1)) * (cfg["epochs"] - epoch)
-
-        writer.add_scalar("val/loss", val_loss, epoch)
-
-        # Print epoch summary
-        print(f"\n{'─' * 60}")
-        print(f"  Epoch {epoch}/{cfg['epochs']}")
-        print(f"{'─' * 60}")
-        print(f"  Train loss:      {train_loss:.4f}")
-        if loss_type in ("aam", "combined") and total > 0:
-            train_acc = correct / total
-            writer.add_scalar("train/accuracy", train_acc, epoch)
-            print(f"  Train accuracy:  {train_acc:.4f}")
-        print(f"  Val loss:        {val_loss:.4f}")
-        if loss_type in ("aam", "combined") and val_total > 0:
-            val_acc = val_correct / val_total
-            writer.add_scalar("val/accuracy", val_acc, epoch)
-            print(f"  Val accuracy:    {val_acc:.4f}")
-        print(f"  LR:              {current_lr:.6f}")
-        print(f"  Train time:      {train_time:.1f}s ({num_train_batches} batches, {avg_batch_time*1000:.0f}ms/batch)")
-        print(f"  Val time:        {val_time:.1f}s ({num_val_batches} batches)")
-        print(f"  Epoch time:      {epoch_time:.1f}s")
-        print(f"  Elapsed:         {elapsed/60:.1f}min | ETA: {remaining/60:.1f}min")
-
-        # Save checkpoint (always save latest)
-        ckpt_dict = {
-            "epoch": epoch,
-            "encoder": encoder.state_dict(),
-            "criterion": criterion.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "val_loss": val_loss,
-        }
-        if use_amp:
-            ckpt_dict["scaler"] = scaler.state_dict()
-        torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "latest.pt"))
-
-        # Save best
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "best_model.pt"))
-            print(f"  ** New best model (val_loss={val_loss:.4f}) **")
-
-        print(f"{'─' * 60}\n")
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
+
+        running_loss += loss.item() * labels.size(0)
+        running_total += labels.size(0)
+
+        if loss_type in ("aam", "combined"):
+            with torch.no_grad():
+                w = criterion.weight if loss_type == "aam" else criterion.aam.weight
+                emb_norm = F.normalize(embeddings.float(), dim=1)
+                w_norm = F.normalize(w, dim=1)
+                preds = F.linear(emb_norm, w_norm).argmax(dim=1)
+                running_correct += (preds == labels).sum().item()
+
+        # Log every N steps
+        if step % log_interval == 0:
+            avg_loss = running_loss / running_total
+            elapsed = time.time() - step_start
+            ms_per_step = (elapsed / log_interval) * 1000
+            current_lr = optimizer.param_groups[0]["lr"]
+
+            msg = f"  Step {step}/{max_steps} | loss: {avg_loss:.4f}"
+            if loss_type in ("aam", "combined") and running_total > 0:
+                msg += f" | acc: {running_correct / running_total:.4f}"
+            msg += f" | lr: {current_lr:.6f} | {ms_per_step:.0f}ms/step"
+
+            print(msg)
+            writer.add_scalar("train/loss", avg_loss, step)
+            writer.add_scalar("train/lr", current_lr, step)
+            writer.add_scalar("train/ms_per_step", ms_per_step, step)
+            if loss_type in ("aam", "combined") and running_total > 0:
+                writer.add_scalar("train/accuracy", running_correct / running_total, step)
+
+            running_loss = 0.0
+            running_correct = 0
+            running_total = 0
+            step_start = time.time()
+
+        # Validation every N steps
+        if step % val_interval == 0:
+            val_loss, val_acc, val_time = run_validation(
+                encoder, criterion, val_loader, device, use_amp, loss_type
+            )
+            elapsed = time.time() - training_start
+            remaining = (elapsed / (step - start_step + 1)) * (max_steps - step)
+
+            print(f"\n{'─' * 60}")
+            print(f"  VALIDATION @ Step {step}/{max_steps}")
+            print(f"{'─' * 60}")
+            print(f"  Val loss:     {val_loss:.4f}")
+            if val_acc is not None:
+                print(f"  Val accuracy: {val_acc:.4f}")
+            print(f"  Val time:     {val_time:.1f}s")
+            print(f"  Elapsed:      {elapsed/60:.1f}min | ETA: {remaining/60:.1f}min")
+
+            writer.add_scalar("val/loss", val_loss, step)
+            if val_acc is not None:
+                writer.add_scalar("val/accuracy", val_acc, step)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                ckpt_dict = {
+                    "step": step,
+                    "encoder": encoder.state_dict(),
+                    "criterion": criterion.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "val_loss": val_loss,
+                }
+                if use_amp:
+                    ckpt_dict["scaler"] = scaler.state_dict()
+                torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "best_model.pt"))
+                print(f"  ** New best model (val_loss={val_loss:.4f}) **")
+
+            print(f"{'─' * 60}\n")
+
+        # Save checkpoint every N steps
+        if step % save_interval == 0:
+            ckpt_dict = {
+                "step": step,
+                "encoder": encoder.state_dict(),
+                "criterion": criterion.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "val_loss": best_val_loss,
+            }
+            if use_amp:
+                ckpt_dict["scaler"] = scaler.state_dict()
+            torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "latest.pt"))
 
     total_time = time.time() - training_start
     print("=" * 60)
     print(f"  Training complete!")
-    print(f"  Total time: {total_time/60:.1f}min")
+    print(f"  Total steps: {max_steps}")
+    print(f"  Total time:  {total_time/60:.1f}min")
     print(f"  Best val loss: {best_val_loss:.4f}")
     print("=" * 60)
     writer.close()
