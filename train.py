@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -211,18 +212,44 @@ def train(config_path, checkpoint=None):
     log_interval = cfg.get("log_interval", 50)
     best_val_loss = float("inf")
 
-    if warmup_epochs > 0:
-        print(f"LR warmup: {warmup_epochs} epochs")
-    if grad_clip > 0:
-        print(f"Gradient clipping: {grad_clip}")
+    # Print training summary
+    num_train_batches = len(batch_sampler)
+    num_val_batches = len(val_loader)
+    batch_size = cfg["speakers_per_batch"] * cfg["samples_per_speaker"]
+    total_params = sum(p.numel() for p in encoder.parameters()) + sum(p.numel() for p in criterion.parameters())
+
+    print("\n" + "=" * 60)
+    print("  TRAINING CONFIGURATION")
+    print("=" * 60)
+    print(f"  Device:              {device}")
+    print(f"  AMP:                 {use_amp}")
+    print(f"  Epochs:              {cfg['epochs']} (start: {start_epoch})")
+    print(f"  Loss:                {loss_type}")
+    print(f"  LR:                  {cfg['lr']} (warmup: {warmup_epochs} epochs)")
+    print(f"  Grad clip:           {grad_clip if grad_clip > 0 else 'disabled'}")
+    print(f"  Batch size:          {batch_size} ({cfg['speakers_per_batch']} spk x {cfg['samples_per_speaker']} samp)")
+    print(f"  Train batches/epoch: {num_train_batches}")
+    print(f"  Val batches/epoch:   {num_val_batches}")
+    print(f"  Train samples:       {len(train_manifest)}")
+    print(f"  Val samples:         {len(val_manifest)}")
+    print(f"  Total speakers:      {len(spk2label)}")
+    print(f"  Model params:        {total_params:,}")
+    print(f"  Feature:             {cfg['feature_type']}")
+    print("=" * 60 + "\n")
+
+    training_start = time.time()
 
     for epoch in range(start_epoch, cfg["epochs"] + 1):
+        epoch_start = time.time()
+
         # Train
         encoder.train()
         criterion.train()
         total_loss, correct, total = 0.0, 0, 0
+        batch_times = []
 
         for step, (feats, labels) in enumerate(train_loader, 1):
+            batch_start = time.time()
             feats, labels = feats.to(device), labels.to(device)
 
             optimizer.zero_grad()
@@ -241,6 +268,9 @@ def train(config_path, checkpoint=None):
             scaler.step(optimizer)
             scaler.update()
 
+            batch_time = time.time() - batch_start
+            batch_times.append(batch_time)
+
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
 
@@ -254,20 +284,19 @@ def train(config_path, checkpoint=None):
                     correct += (preds == labels).sum().item()
 
             if step % log_interval == 0:
-                print(f"Epoch {epoch} Step {step} Loss: {loss.item():.4f}")
+                avg_bt = sum(batch_times[-log_interval:]) / min(log_interval, len(batch_times))
+                print(f"  Step {step}/{num_train_batches} | Loss: {loss.item():.4f} | {avg_bt*1000:.0f}ms/batch")
 
+        train_time = time.time() - epoch_start
         train_loss = total_loss / total
+        avg_batch_time = sum(batch_times) / len(batch_times)
         current_lr = optimizer.param_groups[0]["lr"]
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/lr", current_lr, epoch)
-        msg = f"Epoch {epoch}: train_loss={train_loss:.4f} lr={current_lr:.6f}"
+        writer.add_scalar("train/batch_time_ms", avg_batch_time * 1000, epoch)
 
-        if loss_type in ("aam", "combined") and total > 0:
-            train_acc = correct / total
-            writer.add_scalar("train/accuracy", train_acc, epoch)
-            msg += f" train_acc={train_acc:.4f}"
-
-        # Validate
+        # Validate (runs every epoch, after training)
+        val_start = time.time()
         encoder.eval()
         criterion.eval()
         val_loss_sum, val_total, val_correct = 0.0, 0, 0
@@ -288,16 +317,33 @@ def train(config_path, checkpoint=None):
                     preds = F.linear(emb_norm, w_norm).argmax(dim=1)
                     val_correct += (preds == labels).sum().item()
 
+        val_time = time.time() - val_start
         val_loss = val_loss_sum / max(val_total, 1)
-        writer.add_scalar("val/loss", val_loss, epoch)
-        msg += f" val_loss={val_loss:.4f}"
+        epoch_time = time.time() - epoch_start
+        elapsed = time.time() - training_start
+        remaining = (elapsed / (epoch - start_epoch + 1)) * (cfg["epochs"] - epoch)
 
+        writer.add_scalar("val/loss", val_loss, epoch)
+
+        # Print epoch summary
+        print(f"\n{'─' * 60}")
+        print(f"  Epoch {epoch}/{cfg['epochs']}")
+        print(f"{'─' * 60}")
+        print(f"  Train loss:      {train_loss:.4f}")
+        if loss_type in ("aam", "combined") and total > 0:
+            train_acc = correct / total
+            writer.add_scalar("train/accuracy", train_acc, epoch)
+            print(f"  Train accuracy:  {train_acc:.4f}")
+        print(f"  Val loss:        {val_loss:.4f}")
         if loss_type in ("aam", "combined") and val_total > 0:
             val_acc = val_correct / val_total
             writer.add_scalar("val/accuracy", val_acc, epoch)
-            msg += f" val_acc={val_acc:.4f}"
-
-        print(msg)
+            print(f"  Val accuracy:    {val_acc:.4f}")
+        print(f"  LR:              {current_lr:.6f}")
+        print(f"  Train time:      {train_time:.1f}s ({num_train_batches} batches, {avg_batch_time*1000:.0f}ms/batch)")
+        print(f"  Val time:        {val_time:.1f}s ({num_val_batches} batches)")
+        print(f"  Epoch time:      {epoch_time:.1f}s")
+        print(f"  Elapsed:         {elapsed/60:.1f}min | ETA: {remaining/60:.1f}min")
 
         # Save checkpoint (always save latest)
         ckpt_dict = {
@@ -315,12 +361,18 @@ def train(config_path, checkpoint=None):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "best_model.pt"))
-            print(f"  -> Saved best model (val_loss={val_loss:.4f})")
+            print(f"  ** New best model (val_loss={val_loss:.4f}) **")
 
+        print(f"{'─' * 60}\n")
         scheduler.step()
 
+    total_time = time.time() - training_start
+    print("=" * 60)
+    print(f"  Training complete!")
+    print(f"  Total time: {total_time/60:.1f}min")
+    print(f"  Best val loss: {best_val_loss:.4f}")
+    print("=" * 60)
     writer.close()
-    print("Training complete.")
 
 
 if __name__ == "__main__":
