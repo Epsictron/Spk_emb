@@ -183,7 +183,6 @@ def train(config_path, checkpoint=None):
     validate_config(cfg)
 
     os.makedirs(cfg["output_dir"], exist_ok=True)
-    snapshot_codebase(cfg["output_dir"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = cfg.get("amp", False) and device.type == "cuda"
@@ -347,6 +346,26 @@ def train(config_path, checkpoint=None):
     print(f"  Mix sample size:     {cfg.get('mix_sample_size', 500)}")
     print(f"  Ratio options:       {cfg.get('ratio_options', [30, 40, 50, 60, 70])}")
     print("=" * 60 + "\n")
+
+    # Sanity check: one train batch + one validation before committing
+    print("\n--- Sanity check ---")
+    sanity_iter = infinite_loader(train_loader)
+    sanity_feats, sanity_labels, sanity_genders = next(sanity_iter)
+    sanity_feats, sanity_labels = sanity_feats.to(device), sanity_labels.to(device)
+    with torch.no_grad():
+        with autocast(device_type="cuda", enabled=use_amp):
+            sanity_emb = encoder(sanity_feats)
+            sanity_loss = criterion(sanity_emb, sanity_labels)
+    assert not torch.isnan(sanity_loss), "Sanity check FAILED: NaN loss on first train batch"
+    print(f"  Train batch OK: loss={sanity_loss.item():.4f}, shape={sanity_emb.shape}")
+
+    val_loss, val_acc, val_time = run_validation(
+        encoder, criterion, val_loader, device, use_amp, loss_type
+    )
+    print(f"  Validation OK: loss={val_loss:.4f}" + (f", acc={val_acc:.4f}" if val_acc else ""))
+    print("--- Sanity check passed, saving code snapshot ---\n")
+
+    snapshot_codebase(cfg["output_dir"])
 
     # Training loop (step-based)
     encoder.train()
