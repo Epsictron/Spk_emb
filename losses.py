@@ -58,11 +58,13 @@ class ContrastiveLoss(nn.Module):
         mask = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
         mask.fill_diagonal_(0)
 
-        exp_sim = torch.exp(sim)
-        exp_sim.fill_diagonal_(0)
-        denom = exp_sim.sum(dim=1, keepdim=True)
+        # Use logsumexp for numerical stability (temperature=0.07 makes exp overflow)
+        # Set diagonal to -inf so self-similarity is excluded from denominator
+        sim_for_denom = sim.clone()
+        sim_for_denom.fill_diagonal_(float("-inf"))
+        log_denom = torch.logsumexp(sim_for_denom, dim=1, keepdim=True)
 
-        log_prob = sim - torch.log(denom + 1e-9)
+        log_prob = sim - log_denom
         pos_count = mask.sum(dim=1)
         loss = -(mask * log_prob).sum(dim=1) / (pos_count + 1e-9)
         valid = pos_count > 0

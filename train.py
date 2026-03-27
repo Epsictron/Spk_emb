@@ -4,8 +4,11 @@ import glob
 import json
 import math
 import os
+import random
+import shutil
 import time
 import zipfile
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -129,6 +132,27 @@ def validate_config(cfg):
     if ema_warmup < 0:
         errors.append("ema_warmup_steps must be >= 0")
 
+    # Validate speakers_per_batch against manifest speaker count
+    manifest_path = cfg.get("manifest_path", "")
+    if manifest_path and os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                manifest_data = json.load(f)
+            spk_genders = {}
+            for e in manifest_data:
+                sid = e.get("speaker_id")
+                if sid and sid not in spk_genders:
+                    spk_genders[sid] = e.get("gender", "").lower()
+            n_male = sum(1 for g in spk_genders.values() if g == "male")
+            n_female = sum(1 for g in spk_genders.values() if g == "female")
+            half_spk = cfg.get("speakers_per_batch", 0) // 2
+            if half_spk > n_male:
+                errors.append(f"speakers_per_batch/2={half_spk} > male speakers={n_male}")
+            if half_spk > n_female:
+                errors.append(f"speakers_per_batch/2={half_spk} > female speakers={n_female}")
+        except Exception:
+            pass  # Non-fatal: skip check if manifest can't be read
+
     if errors:
         print("Config validation errors:")
         for e in errors:
@@ -151,7 +175,7 @@ def find_lr(encoder, criterion, train_loader, optimizer, device, use_amp,
     criterion_state = {k: v.clone() for k, v in criterion.state_dict().items()}
     optim_state = optimizer.state_dict()
 
-    scaler = GradScaler("cuda", enabled=use_amp)
+    scaler = GradScaler(device.type, enabled=use_amp)
     data_iter = infinite_loader(train_loader)
 
     mult = (end_lr / start_lr) ** (1 / num_steps)
@@ -279,7 +303,19 @@ def train(config_path, checkpoint=None):
 
     validate_config(cfg)
 
+    # Seed for reproducibility
+    seed = cfg.get("seed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    print(f"Random seed: {seed}")
+
     os.makedirs(cfg["output_dir"], exist_ok=True)
+
+    # Save config to output_dir for reproducibility
+    shutil.copy2(config_path, os.path.join(cfg["output_dir"], "config.json"))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = cfg.get("amp", False) and device.type == "cuda"
@@ -335,17 +371,25 @@ def train(config_path, checkpoint=None):
         cfg["hop_length"], cfg["win_length"], spk2label=spk2label,
     )
 
+    # Worker init fn for reproducible augmentation across workers
+    def worker_init_fn(worker_id):
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+
     # Sampler: gender-balanced speaker batch sampler
     batch_sampler = SpeakerBatchSampler(
         train_manifest, cfg["speakers_per_batch"], cfg["samples_per_speaker"]
     )
     train_loader = DataLoader(
         train_ds, batch_sampler=batch_sampler,
-        num_workers=cfg["num_workers"], pin_memory=True
+        num_workers=cfg["num_workers"], pin_memory=True,
+        worker_init_fn=worker_init_fn,
     )
     val_loader = DataLoader(
         val_ds, batch_size=cfg["speakers_per_batch"] * cfg["samples_per_speaker"],
-        shuffle=False, num_workers=cfg["num_workers"], pin_memory=True
+        shuffle=False, num_workers=cfg["num_workers"], pin_memory=True,
+        worker_init_fn=worker_init_fn,
     )
 
     # Model
@@ -385,9 +429,8 @@ def train(config_path, checkpoint=None):
     ema_warmup_steps = cfg.get("ema_warmup_steps", 2000)
     diag_interval = cfg.get("diag_interval", 100)
 
-    optimizer = torch.optim.Adam(
-        list(encoder.parameters()) + list(criterion.parameters()), lr=cfg["lr"]
-    )
+    all_params = list(encoder.parameters()) + list(criterion.parameters())
+    optimizer = torch.optim.Adam(all_params, lr=cfg["lr"])
 
     # LR schedule: linear warmup + cosine decay (step-based)
     def lr_lambda(step):
@@ -397,7 +440,7 @@ def train(config_path, checkpoint=None):
         return 0.5 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    scaler = GradScaler("cuda", enabled=use_amp)
+    scaler = GradScaler(device.type, enabled=use_amp)
 
     # EMA Memory Bank
     ema_bank = EMAMemoryBank(
@@ -559,21 +602,21 @@ def train(config_path, checkpoint=None):
             print(f"  [WARN] Step {step}: NaN/Inf loss detected, skipping step")
             writer.add_scalar("train/nan_count", 1, step)
             optimizer.zero_grad()
+            scheduler.step()
             continue
 
         scaler.scale(loss).backward()
 
         if grad_clip > 0:
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                list(encoder.parameters()) + list(criterion.parameters()), grad_clip
-            )
+            grad_norm = torch.nn.utils.clip_grad_norm_(all_params, grad_clip)
             # Skip step if gradients are NaN
             if torch.isnan(grad_norm) or torch.isinf(grad_norm):
                 print(f"  [WARN] Step {step}: NaN/Inf gradient detected, skipping step")
                 writer.add_scalar("train/nan_count", 1, step)
                 optimizer.zero_grad()
                 scaler.update()
+                scheduler.step()
                 continue
 
         scaler.step(optimizer)
@@ -641,6 +684,8 @@ def train(config_path, checkpoint=None):
             writer.add_scalar("train/loss", avg_loss, step)
             writer.add_scalar("train/lr", current_lr, step)
             writer.add_scalar("train/ms_per_step", ms_per_step, step)
+            if grad_clip > 0:
+                writer.add_scalar("train/grad_norm", grad_norm, step)
             if loss_type in ("aam", "combined") and running_total > 0:
                 writer.add_scalar("train/accuracy", running_correct / running_total, step)
 

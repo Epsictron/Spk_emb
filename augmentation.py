@@ -25,8 +25,8 @@ def add_reverb(wav, rir_wav):
     Returns:
         (T,) torch tensor
     """
-    wav_np = wav.numpy()
-    rir_np = rir_wav.numpy()
+    wav_np = wav.cpu().numpy()
+    rir_np = rir_wav.cpu().numpy()
     wav_len = wav_np.shape[0]
 
     # Normalize RIR
@@ -54,8 +54,8 @@ def add_noise(wav, noise=None, snr_low=0, snr_high=15):
     if noise is None:
         noise = torch.randn_like(wav)
 
-    wav_np = wav.numpy()
-    noise_np = noise.numpy()
+    wav_np = wav.cpu().numpy()
+    noise_np = noise.cpu().numpy()
     wav_len = wav_np.shape[0]
     noise_len = noise_np.shape[0]
 
@@ -116,6 +116,9 @@ def spec_augment(features, freq_mask_width=10, time_mask_width=20,
     """
     features = features.clone()
     n_mels, T = features.shape
+
+    if n_mels <= 1 or T <= 1:
+        return features
 
     # Frequency masking
     for _ in range(num_freq_masks):

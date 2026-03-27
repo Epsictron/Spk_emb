@@ -40,6 +40,7 @@
     "lr_finder_end": 1.0,
     "lr_finder_steps": 100,
     "lr_finder_auto": false,
+    "seed": 42,
     "keep_last_n_checkpoints": 3,
     "augmentation": {
         "noise_prob": 0.0,

@@ -42,9 +42,15 @@ class SpeakerDataset(Dataset):
     def __len__(self):
         return len(self.entries)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, _retry=0):
         entry = self.entries[idx]
-        wav, sr = torchaudio.load(entry["audio_file_path"])
+        try:
+            wav, sr = torchaudio.load(entry["audio_file_path"])
+        except Exception as e:
+            if _retry >= 3:
+                raise RuntimeError(f"Failed to load audio after 3 retries: {entry['audio_file_path']}") from e
+            print(f"[WARN] Failed to load {entry['audio_file_path']}: {e}, picking another sample")
+            return self.__getitem__(random.randint(0, len(self) - 1), _retry + 1)
         if sr != self.sample_rate:
             wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
 
@@ -124,21 +130,6 @@ class SpeakerBatchSampler(Sampler):
         print(f"SpeakerBatchSampler: {len(self.male_speakers)} male, {len(self.female_speakers)} female speakers")
         print(f"  {self.half_spk} male + {self.half_spk} female per batch x {samples_per_speaker} samples = {self.batch_size}/batch")
         print(f"  {self.num_batches} batches per epoch")
-
-    def _pick_speakers(self, speaker_list, count):
-        """Pick `count` speakers without replacement. Reshuffles when exhausted."""
-        picked = []
-        pool = list(speaker_list)
-        random.shuffle(pool)
-        idx = 0
-        while len(picked) < count:
-            if idx >= len(pool):
-                # All speakers used, reshuffle
-                random.shuffle(pool)
-                idx = 0
-            picked.append(pool[idx])
-            idx += 1
-        return picked, pool[idx:]  # return remaining for next batch
 
     def __iter__(self):
         male_pool = list(self.male_speakers)

@@ -42,7 +42,7 @@ class SpeakerEncoder(nn.Module):
         )
 
         # Final projection
-        self.fc = nn.Linear(512, embedding_dim)
+        self.fc = nn.Linear(512, embedding_dim, bias=False)
         self.bn = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x):
