@@ -13,9 +13,12 @@ class AAMSoftmaxLoss(nn.Module):
         self.ce = nn.CrossEntropyLoss()
 
     def forward(self, embeddings, labels):
-        embeddings = F.normalize(embeddings, dim=1)
-        weight = F.normalize(self.weight, dim=1)
+        embeddings = F.normalize(embeddings, dim=1, eps=1e-8)
+        weight = F.normalize(self.weight, dim=1, eps=1e-8)
         cosine = F.linear(embeddings, weight)
+
+        # Clamp cosine to avoid numerical issues with arccos-like operations
+        cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
 
         one_hot = F.one_hot(labels, cosine.size(1)).float()
         cosine = cosine - one_hot * self.margin
@@ -29,8 +32,10 @@ class PrototypicalLoss(nn.Module):
         super().__init__()
 
     def forward(self, embeddings, labels):
+        embeddings = F.normalize(embeddings, dim=1, eps=1e-8)
         unique_labels = labels.unique()
         prototypes = torch.stack([embeddings[labels == l].mean(0) for l in unique_labels])
+        prototypes = F.normalize(prototypes, dim=1, eps=1e-8)
 
         label_map = {l.item(): i for i, l in enumerate(unique_labels)}
         mapped = torch.tensor([label_map[l.item()] for l in labels], device=labels.device)
@@ -47,7 +52,7 @@ class ContrastiveLoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, emb, labels):
-        emb_norm = F.normalize(emb, dim=1)
+        emb_norm = F.normalize(emb, dim=1, eps=1e-8)
         sim = torch.mm(emb_norm, emb_norm.t()) / self.temperature
 
         mask = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()

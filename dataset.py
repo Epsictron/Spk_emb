@@ -50,14 +50,19 @@ class SpeakerDataset(Dataset):
             wav = wav.mean(dim=0, keepdim=True)
         wav = wav[0]
 
-        # Crop or pad to fixed length
+        # Crop or loop-pad to fixed length
         if wav.size(0) > self.segment_len:
             start = random.randint(0, wav.size(0) - self.segment_len)
             wav = wav[start:start + self.segment_len]
-        else:
-            wav = torch.nn.functional.pad(wav, (0, self.segment_len - wav.size(0)))
+        elif wav.size(0) < self.segment_len:
+            # Loop/repeat instead of zero-pad to avoid silence artifacts
+            repeats = self.segment_len // wav.size(0) + 1
+            wav = wav.repeat(repeats)[:self.segment_len]
 
         features = self.feature_fn(wav)  # (n_mels, T)
+
+        # Log mel + epsilon to avoid -inf/NaN
+        features = torch.log(features + 1e-9)
         spk = entry["speaker_id"]
         if spk not in self.spk2label:
             raise KeyError(f"Speaker '{spk}' not in spk2label. Available: {len(self.spk2label)} speakers. "

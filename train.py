@@ -141,8 +141,8 @@ def run_validation(encoder, criterion, val_loader, device, use_amp, loss_type):
 
             if loss_type in ("aam", "combined"):
                 w = criterion.weight if loss_type == "aam" else criterion.aam.weight
-                emb_norm = F.normalize(embeddings.float(), dim=1)
-                w_norm = F.normalize(w, dim=1)
+                emb_norm = F.normalize(embeddings.float(), dim=1, eps=1e-8)
+                w_norm = F.normalize(w, dim=1, eps=1e-8)
                 preds = F.linear(emb_norm, w_norm).argmax(dim=1)
                 val_correct += (preds == labels).sum().item()
 
@@ -346,13 +346,27 @@ def train(config_path, checkpoint=None):
             embeddings = encoder(feats)
             loss = criterion(embeddings, labels)
 
+        # NaN detection: skip step if loss is NaN
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"  [WARN] Step {step}: NaN/Inf loss detected, skipping step")
+            writer.add_scalar("train/nan_count", 1, step)
+            optimizer.zero_grad()
+            continue
+
         scaler.scale(loss).backward()
 
         if grad_clip > 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 list(encoder.parameters()) + list(criterion.parameters()), grad_clip
             )
+            # Skip step if gradients are NaN
+            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                print(f"  [WARN] Step {step}: NaN/Inf gradient detected, skipping step")
+                writer.add_scalar("train/nan_count", 1, step)
+                optimizer.zero_grad()
+                scaler.update()
+                continue
 
         scaler.step(optimizer)
         scaler.update()
@@ -364,8 +378,8 @@ def train(config_path, checkpoint=None):
         if loss_type in ("aam", "combined"):
             with torch.no_grad():
                 w = criterion.weight if loss_type == "aam" else criterion.aam.weight
-                emb_norm = F.normalize(embeddings.float(), dim=1)
-                w_norm = F.normalize(w, dim=1)
+                emb_norm = F.normalize(embeddings.float(), dim=1, eps=1e-8)
+                w_norm = F.normalize(w, dim=1, eps=1e-8)
                 preds = F.linear(emb_norm, w_norm).argmax(dim=1)
                 running_correct += (preds == labels).sum().item()
 
