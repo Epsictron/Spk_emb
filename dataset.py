@@ -9,11 +9,14 @@ from torch.utils.data import Dataset, Sampler
 class SpeakerDataset(Dataset):
     def __init__(self, entries, sample_rate=16000, segment_duration=3.0,
                  feature_type="melspectrogram", n_mels=80, n_fft=512,
-                 hop_length=160, win_length=400, spk2label=None):
+                 hop_length=160, win_length=400, spk2label=None,
+                 wav_augmentor=None, spec_augmentor=None):
         self.entries = entries
         self.sample_rate = sample_rate
         self.segment_len = int(sample_rate * segment_duration)
         self.feature_type = feature_type
+        self.wav_augmentor = wav_augmentor
+        self.spec_augmentor = spec_augmentor
 
         # Use provided mapping or build from entries
         if spk2label is not None:
@@ -50,6 +53,10 @@ class SpeakerDataset(Dataset):
             wav = wav.mean(dim=0, keepdim=True)
         wav = wav[0]
 
+        # Waveform augmentation (before cropping so speed perturb can change length)
+        if self.wav_augmentor is not None:
+            wav = self.wav_augmentor(wav)
+
         # Crop or loop-pad to fixed length
         if wav.size(0) > self.segment_len:
             start = random.randint(0, wav.size(0) - self.segment_len)
@@ -63,6 +70,10 @@ class SpeakerDataset(Dataset):
 
         # Log mel + epsilon to avoid -inf/NaN
         features = torch.log(features + 1e-9)
+
+        # Feature-level augmentation (SpecAugment)
+        if self.spec_augmentor is not None:
+            features = self.spec_augmentor(features)
         spk = entry["speaker_id"]
         if spk not in self.spk2label:
             raise KeyError(f"Speaker '{spk}' not in spk2label. Available: {len(self.spk2label)} speakers. "

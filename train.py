@@ -16,6 +16,7 @@ from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_ma
 from model import SpeakerEncoder
 from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 from ema_bank import EMAMemoryBank
+from augmentation import WavAugmentor, SpecAugmentor
 
 
 def snapshot_codebase(output_dir):
@@ -301,15 +302,37 @@ def train(config_path, checkpoint=None):
         if e["speaker_id"] not in spk2gender:
             spk2gender[e["speaker_id"]] = e.get("gender", "").lower()
 
+    # Augmentation (train only, all probs default to 0.0 = disabled)
+    aug_cfg = cfg.get("augmentation", {})
+    wav_augmentor = WavAugmentor(
+        sample_rate=cfg["sample_rate"],
+        noise_prob=aug_cfg.get("noise_prob", 0.0),
+        noise_file=aug_cfg.get("noise_file", None),
+        noise_snr_low=aug_cfg.get("noise_snr_low", 0),
+        noise_snr_high=aug_cfg.get("noise_snr_high", 15),
+        reverb_prob=aug_cfg.get("reverb_prob", 0.0),
+        reverb_file=aug_cfg.get("reverb_file", None),
+        speed_prob=aug_cfg.get("speed_prob", 0.0),
+        speed_factors=aug_cfg.get("speed_factors", [0.9, 1.0, 1.1]),
+    )
+    spec_augmentor = SpecAugmentor(
+        prob=aug_cfg.get("spec_aug_prob", 0.0),
+        freq_mask_width=aug_cfg.get("freq_mask_width", 10),
+        time_mask_width=aug_cfg.get("time_mask_width", 20),
+        num_freq_masks=aug_cfg.get("num_freq_masks", 1),
+        num_time_masks=aug_cfg.get("num_time_masks", 1),
+    )
+
     train_ds = SpeakerDataset(
         train_manifest, cfg["sample_rate"], cfg["segment_duration"],
         cfg["feature_type"], cfg["n_mels"], cfg["n_fft"],
-        cfg["hop_length"], cfg["win_length"], spk2label=spk2label
+        cfg["hop_length"], cfg["win_length"], spk2label=spk2label,
+        wav_augmentor=wav_augmentor, spec_augmentor=spec_augmentor,
     )
     val_ds = SpeakerDataset(
         val_manifest, cfg["sample_rate"], cfg["segment_duration"],
         cfg["feature_type"], cfg["n_mels"], cfg["n_fft"],
-        cfg["hop_length"], cfg["win_length"], spk2label=spk2label
+        cfg["hop_length"], cfg["win_length"], spk2label=spk2label,
     )
 
     # Sampler: gender-balanced speaker batch sampler
