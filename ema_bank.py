@@ -213,9 +213,9 @@ class EMAMemoryBank:
         if pairwise_sims.numel() == 0:
             return 0.0
 
-        # Average cosine distance
-        avg_dist = (1.0 - pairwise_sims.mean()).item()
-        return avg_dist
+        # Average cosine similarity (higher = speakers too similar = worse)
+        avg_sim = pairwise_sims.mean().item()
+        return avg_sim
 
     def _compute_recommended_ratio(self):
         """Compute what the ratio WOULD be based on diagnostic scores.
