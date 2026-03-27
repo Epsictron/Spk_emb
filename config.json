@@ -34,5 +34,11 @@
     "cold_speaker_limit": 500,
     "mix_sample_size": 500,
     "ratio_thresholds": [0.55, 0.65],
-    "ratio_options": [30, 40, 50, 60, 70]
+    "ratio_options": [30, 40, 50, 60, 70],
+    "lr_finder": false,
+    "lr_finder_start": 1e-7,
+    "lr_finder_end": 1.0,
+    "lr_finder_steps": 100,
+    "lr_finder_auto": false,
+    "keep_last_n_checkpoints": 3
 }

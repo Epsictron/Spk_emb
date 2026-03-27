@@ -137,6 +137,102 @@ def validate_config(cfg):
     print("[OK] Config validated")
 
 
+def find_lr(encoder, criterion, train_loader, optimizer, device, use_amp,
+            start_lr=1e-7, end_lr=1.0, num_steps=100, writer=None):
+    """LR range test: sweep LR from start_lr to end_lr, find where loss drops fastest.
+
+    Returns suggested LR (point of steepest loss decrease).
+    """
+    print("\n--- Learning Rate Finder ---")
+
+    # Save initial states to restore after
+    encoder_state = {k: v.clone() for k, v in encoder.state_dict().items()}
+    criterion_state = {k: v.clone() for k, v in criterion.state_dict().items()}
+    optim_state = optimizer.state_dict()
+
+    scaler = GradScaler("cuda", enabled=use_amp)
+    data_iter = infinite_loader(train_loader)
+
+    mult = (end_lr / start_lr) ** (1 / num_steps)
+    lr = start_lr
+    best_loss = float("inf")
+    losses = []
+    lrs = []
+
+    for i in range(num_steps):
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
+
+        feats, labels, _ = next(data_iter)
+        feats, labels = feats.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        with autocast(device_type="cuda", enabled=use_amp):
+            emb = encoder(feats)
+            loss = criterion(emb, labels)
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            break
+
+        # Stop if loss explodes (>4x best)
+        if loss.item() > best_loss * 4 and i > 10:
+            break
+
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+
+        losses.append(loss.item())
+        lrs.append(lr)
+
+        if writer:
+            writer.add_scalar("lr_finder/loss", loss.item(), i)
+            writer.add_scalar("lr_finder/lr", lr, i)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        lr *= mult
+
+    # Restore original states
+    encoder.load_state_dict(encoder_state)
+    criterion.load_state_dict(criterion_state)
+    optimizer.load_state_dict(optim_state)
+
+    if len(losses) < 10:
+        print("  LR finder: too few steps, using config LR")
+        return None
+
+    # Find steepest loss decrease (smoothed gradient)
+    window = max(3, len(losses) // 10)
+    smoothed = []
+    for i in range(window, len(losses)):
+        smoothed.append((losses[i] - losses[i - window]) / window)
+
+    if not smoothed:
+        return None
+
+    min_idx = smoothed.index(min(smoothed)) + window
+    suggested_lr = lrs[min_idx]
+
+    print(f"  Tested {len(losses)} LR values: {start_lr:.1e} → {lrs[-1]:.1e}")
+    print(f"  Best loss: {best_loss:.4f}")
+    print(f"  Suggested LR: {suggested_lr:.6f}")
+    print("--- LR Finder complete ---\n")
+
+    return suggested_lr
+
+
+def manage_checkpoints(output_dir, keep_last_n=3):
+    """Keep only the last N step checkpoints. Never deletes best_model.pt."""
+    pattern = os.path.join(output_dir, "checkpoint_step_*.pt")
+    ckpts = sorted(glob.glob(pattern), key=os.path.getmtime)
+    while len(ckpts) > keep_last_n:
+        old = ckpts.pop(0)
+        os.remove(old)
+        print(f"  Removed old checkpoint: {os.path.basename(old)}")
+
+
 def infinite_loader(data_loader):
     """Yields batches forever, restarting the loader when exhausted."""
     while True:
@@ -367,6 +463,26 @@ def train(config_path, checkpoint=None):
 
     snapshot_codebase(cfg["output_dir"])
 
+    # LR finder (only on fresh start, not resume)
+    if cfg.get("lr_finder", False) and start_step == 1:
+        suggested_lr = find_lr(
+            encoder, criterion, train_loader, optimizer, device, use_amp,
+            start_lr=cfg.get("lr_finder_start", 1e-7),
+            end_lr=cfg.get("lr_finder_end", 1.0),
+            num_steps=cfg.get("lr_finder_steps", 100),
+            writer=writer,
+        )
+        if suggested_lr is not None:
+            if cfg.get("lr_finder_auto", False):
+                cfg["lr"] = suggested_lr
+                for pg in optimizer.param_groups:
+                    pg["lr"] = suggested_lr
+                print(f"  Auto-applied suggested LR: {suggested_lr:.6f}")
+            else:
+                print(f"  Suggested LR: {suggested_lr:.6f} (not auto-applied, set lr_finder_auto=true to use)")
+
+    keep_last_n = cfg.get("keep_last_n_checkpoints", 3)
+
     # Training loop (step-based)
     encoder.train()
     criterion.train()
@@ -530,7 +646,7 @@ def train(config_path, checkpoint=None):
 
             print(f"{'─' * 60}\n")
 
-        # Save checkpoint every N steps
+        # Save checkpoint every N steps (keep last N)
         if step % save_interval == 0:
             ckpt_dict = {
                 "step": step,
@@ -542,7 +658,11 @@ def train(config_path, checkpoint=None):
             }
             if use_amp:
                 ckpt_dict["scaler"] = scaler.state_dict()
+            ckpt_path = os.path.join(cfg["output_dir"], f"checkpoint_step_{step}.pt")
+            torch.save(ckpt_dict, ckpt_path)
+            # Also save as latest.pt for easy resume
             torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "latest.pt"))
+            manage_checkpoints(cfg["output_dir"], keep_last_n=keep_last_n)
 
     total_time = time.time() - training_start
     print("=" * 60)
