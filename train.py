@@ -1,8 +1,11 @@
 import argparse
+import datetime
+import glob
 import json
 import math
 import os
 import time
+import zipfile
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -13,6 +16,24 @@ from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_ma
 from model import SpeakerEncoder
 from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 from ema_bank import EMAMemoryBank
+
+
+def snapshot_codebase(output_dir):
+    """Save all project files into a timestamped zip for reproducibility."""
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_path = os.path.join(output_dir, f"code_snapshot_{timestamp}.zip")
+
+    patterns = ["*.py", "*.json", "*.yaml", "*.yml", "*.toml", "*.cfg", "*.sh", ".gitignore"]
+    files = []
+    for pat in patterns:
+        files.extend(glob.glob(pat))
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(set(files)):
+            zf.write(f)
+
+    print(f"[OK] Code snapshot saved: {zip_path} ({len(files)} files)")
+    return zip_path
 
 
 def validate_config(cfg):
@@ -162,6 +183,8 @@ def train(config_path, checkpoint=None):
     validate_config(cfg)
 
     os.makedirs(cfg["output_dir"], exist_ok=True)
+    snapshot_codebase(cfg["output_dir"])
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = cfg.get("amp", False) and device.type == "cuda"
     if use_amp:
