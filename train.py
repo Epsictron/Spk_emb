@@ -432,7 +432,34 @@ def train(config_path, checkpoint=None):
     else:
         print("Starting from scratch")
 
-    writer = SummaryWriter(log_dir=os.path.join(cfg["output_dir"], "tb_logs"))
+    # Build descriptive experiment name
+    aug_cfg = cfg.get("augmentation", {})
+    aug_tags = []
+    if aug_cfg.get("noise_prob", 0) > 0:
+        aug_tags.append("noise")
+    if aug_cfg.get("reverb_prob", 0) > 0:
+        aug_tags.append("reverb")
+    if aug_cfg.get("speed_prob", 0) > 0:
+        aug_tags.append("speed")
+    if aug_cfg.get("spec_aug_prob", 0) > 0:
+        aug_tags.append("specaug")
+    aug_str = "+".join(aug_tags) if aug_tags else "noaug"
+
+    exp_name = (
+        f"convlstm_attn"
+        f"_{loss_type}"
+        f"_emb{cfg['embedding_dim']}"
+        f"_spk{cfg['speakers_per_batch']}x{cfg['samples_per_speaker']}"
+        f"_lr{cfg['lr']}"
+        f"_warm{warmup_steps}"
+        f"_{aug_str}"
+        f"_steps{max_steps // 1000}k"
+    )
+    print(f"Experiment: {exp_name}")
+
+    tb_log_dir = os.path.join(cfg["output_dir"], "tb_logs", exp_name)
+    writer = SummaryWriter(log_dir=tb_log_dir)
+    print(f"TensorBoard: {tb_log_dir}")
     best_val_loss = float("inf")
 
     # Print training summary
