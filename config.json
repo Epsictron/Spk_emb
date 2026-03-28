@@ -33,8 +33,6 @@
     "diag_score_alpha": 0.05,
     "cold_speaker_limit": 500,
     "mix_sample_size": 500,
-    "ratio_thresholds": [0.55, 0.65],
-    "ratio_options": [30, 40, 50, 60, 70],
     "lr_finder": false,
     "lr_finder_start": 1e-7,
     "lr_finder_end": 1.0,

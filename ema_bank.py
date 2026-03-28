@@ -1,4 +1,4 @@
-"""EMA Memory Bank for speaker embeddings with diagnostic loss computation."""
+"""EMA Memory Bank for speaker embeddings with diagnostic cosine similarity computation."""
 
 import random
 import torch
@@ -6,22 +6,18 @@ import torch.nn.functional as F
 
 
 class EMAMemoryBank:
-    """Maintains EMA-updated speaker embeddings and computes diagnostic losses.
+    """Maintains EMA-updated speaker embeddings and computes diagnostic cosine similarities.
 
-    Diagnostic losses:
-    - M-self: avg distance of male batch embeddings to their EMA bank embeddings
-    - F-self: avg distance of female batch embeddings to their EMA bank embeddings
-    - M-mix: avg pairwise distance among male speakers in the bank (sampled)
-    - F-mix: avg pairwise distance among female speakers in the bank (sampled)
-
-    Dynamic ratio monitoring:
-    - Computes recommended male/female ratio based on diagnostic scores
-    - Logs what the ratio WOULD be (does not apply changes)
+    All diagnostics report cosine similarity:
+    - M-self: avg cosine similarity of male batch embeddings to their EMA bank embeddings (higher = better)
+    - F-self: avg cosine similarity of female batch embeddings to their EMA bank embeddings (higher = better)
+    - M-mix: avg pairwise cosine similarity among male speakers in the bank (lower = better)
+    - F-mix: avg pairwise cosine similarity among female speakers in the bank (lower = better)
     """
 
     def __init__(self, num_speakers, embedding_dim, spk2label, spk2gender,
                  ema_alpha=0.01, cold_speaker_limit=500, mix_sample_size=500,
-                 diag_score_alpha=0.05, ratio_thresholds=None, ratio_options=None):
+                 diag_score_alpha=0.05):
         """
         Args:
             num_speakers: total number of speakers
@@ -32,8 +28,6 @@ class EMAMemoryBank:
             cold_speaker_limit: skip speakers not seen in last N steps
             mix_sample_size: number of random speakers to sample for mix computation
             diag_score_alpha: EMA smoothing rate for diagnostic scores
-            ratio_thresholds: [low, high] thresholds for ratio changes
-            ratio_options: list of male% options e.g. [30, 40, 50, 60, 70]
         """
         self.num_speakers = num_speakers
         self.embedding_dim = embedding_dim
@@ -41,10 +35,6 @@ class EMAMemoryBank:
         self.cold_speaker_limit = cold_speaker_limit
         self.mix_sample_size = mix_sample_size
         self.diag_score_alpha = diag_score_alpha
-
-        self.ratio_thresholds = ratio_thresholds or [0.55, 0.65]
-        self.ratio_options = ratio_options or [30, 40, 50, 60, 70]
-        self.current_ratio_idx = len(self.ratio_options) // 2  # start at 50/50
 
         # Bank: (num_speakers, embedding_dim) - initialized to zeros
         self.bank = torch.zeros(num_speakers, embedding_dim)
@@ -133,15 +123,13 @@ class EMAMemoryBank:
             batch_mean = emb_norm[mask].mean(dim=0)
             bank_emb = self.bank[label_idx]
 
-            # Cosine distance = 1 - cosine_similarity
             cos_sim = F.cosine_similarity(batch_mean.unsqueeze(0), bank_emb.unsqueeze(0)).item()
-            dist = 1.0 - cos_sim
 
             gender = self.label2gender.get(label_idx, "")
             if gender == "male":
-                m_self_dists.append(dist)
+                m_self_dists.append(cos_sim)
             elif gender == "female":
-                f_self_dists.append(dist)
+                f_self_dists.append(cos_sim)
 
         m_self = sum(m_self_dists) / max(len(m_self_dists), 1)
         f_self = sum(f_self_dists) / max(len(f_self_dists), 1)
@@ -156,9 +144,6 @@ class EMAMemoryBank:
         self.ema_m_mix = (1 - self.diag_score_alpha) * self.ema_m_mix + self.diag_score_alpha * m_mix
         self.ema_f_mix = (1 - self.diag_score_alpha) * self.ema_f_mix + self.diag_score_alpha * f_mix
 
-        # Compute recommended ratio (but don't apply)
-        recommended_ratio = self._compute_recommended_ratio()
-
         return {
             "m_self": m_self,
             "f_self": f_self,
@@ -168,8 +153,6 @@ class EMAMemoryBank:
             "ema_f_self": self.ema_f_self,
             "ema_m_mix": self.ema_m_mix,
             "ema_f_mix": self.ema_f_mix,
-            "recommended_ratio": recommended_ratio,
-            "current_ratio_idx": self.current_ratio_idx,
         }
 
     def _compute_mix(self, gender, step):
@@ -217,35 +200,6 @@ class EMAMemoryBank:
         avg_sim = pairwise_sims.mean().item()
         return avg_sim
 
-    def _compute_recommended_ratio(self):
-        """Compute what the ratio WOULD be based on diagnostic scores.
-
-        Logic: if male loss is relatively higher than female, recommend more male speakers.
-        Uses one-step-at-a-time changes.
-
-        Returns the recommended male% from ratio_options.
-        """
-        # Combine self + mix for each gender
-        m_score = self.ema_m_self + self.ema_m_mix
-        f_score = self.ema_f_self + self.ema_f_mix
-
-        total = m_score + f_score
-        if total < 1e-9:
-            return self.ratio_options[self.current_ratio_idx]
-
-        # Male proportion of total diagnostic score
-        m_proportion = m_score / total
-
-        low_thresh, high_thresh = self.ratio_thresholds
-
-        # One-step-at-a-time: if male score is high, move ratio toward more male
-        if m_proportion > high_thresh and self.current_ratio_idx < len(self.ratio_options) - 1:
-            self.current_ratio_idx += 1
-        elif m_proportion < low_thresh and self.current_ratio_idx > 0:
-            self.current_ratio_idx -= 1
-
-        return self.ratio_options[self.current_ratio_idx]
-
     def get_bank_stats(self):
         """Return summary stats about the bank."""
         n_init = self.initialized.sum().item()
@@ -268,7 +222,6 @@ class EMAMemoryBank:
             "ema_f_self": self.ema_f_self,
             "ema_m_mix": self.ema_m_mix,
             "ema_f_mix": self.ema_f_mix,
-            "current_ratio_idx": self.current_ratio_idx,
         }
 
     def load_state_dict(self, state):
@@ -280,4 +233,3 @@ class EMAMemoryBank:
         self.ema_f_self = state["ema_f_self"]
         self.ema_m_mix = state["ema_m_mix"]
         self.ema_f_mix = state["ema_f_mix"]
-        self.current_ratio_idx = state["current_ratio_idx"]

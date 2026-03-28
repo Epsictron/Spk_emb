@@ -452,8 +452,6 @@ def train(config_path, checkpoint=None):
         cold_speaker_limit=cfg.get("cold_speaker_limit", 500),
         mix_sample_size=cfg.get("mix_sample_size", 500),
         diag_score_alpha=cfg.get("diag_score_alpha", 0.05),
-        ratio_thresholds=cfg.get("ratio_thresholds", [0.55, 0.65]),
-        ratio_options=cfg.get("ratio_options", [30, 40, 50, 60, 70]),
     ).to(device)
 
     start_step = 1
@@ -533,7 +531,7 @@ def train(config_path, checkpoint=None):
     print(f"  EMA alpha:           {cfg.get('ema_alpha', 0.01)}")
     print(f"  Cold speaker limit:  {cfg.get('cold_speaker_limit', 500)} steps")
     print(f"  Mix sample size:     {cfg.get('mix_sample_size', 500)}")
-    print(f"  Ratio options:       {cfg.get('ratio_options', [30, 40, 50, 60, 70])}")
+    print(f"  Diag score alpha:    {cfg.get('diag_score_alpha', 0.05)}")
     print("=" * 60 + "\n")
 
     # Sanity check: one train batch + one validation before committing
@@ -655,9 +653,6 @@ def train(config_path, checkpoint=None):
             writer.add_scalar("diag_ema/m_mix", diag["ema_m_mix"], step)
             writer.add_scalar("diag_ema/f_mix", diag["ema_f_mix"], step)
 
-            # Log recommended ratio (NOT applied)
-            writer.add_scalar("diag/recommended_male_ratio", diag["recommended_ratio"], step)
-
             # Log bank stats
             bank_stats = ema_bank.get_bank_stats()
             writer.add_scalar("bank/initialized_speakers", bank_stats["total_initialized"], step)
@@ -677,8 +672,7 @@ def train(config_path, checkpoint=None):
             # Add diagnostic info if available
             if step >= ema_warmup_steps and step % diag_interval == 0:
                 msg += (f" | diag: Ms={diag['ema_m_self']:.3f} Fs={diag['ema_f_self']:.3f}"
-                        f" Mm={diag['ema_m_mix']:.3f} Fm={diag['ema_f_mix']:.3f}"
-                        f" ratio={diag['recommended_ratio']}%M")
+                        f" Mm={diag['ema_m_mix']:.3f} Fm={diag['ema_f_mix']:.3f}")
 
             print(msg)
             writer.add_scalar("train/loss", avg_loss, step)
@@ -718,7 +712,6 @@ def train(config_path, checkpoint=None):
             if step >= ema_warmup_steps:
                 print(f"  Diag scores:  Ms={ema_bank.ema_m_self:.4f} Fs={ema_bank.ema_f_self:.4f} "
                       f"Mm={ema_bank.ema_m_mix:.4f} Fm={ema_bank.ema_f_mix:.4f}")
-                print(f"  Recommended ratio: {ema_bank.ratio_options[ema_bank.current_ratio_idx]}% male (monitoring only)")
 
             writer.add_scalar("val/loss", val_loss, step)
             if val_acc is not None:
