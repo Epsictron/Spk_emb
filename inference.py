@@ -61,15 +61,23 @@ def load_audio(audio_path, cfg, target_duration=10.0):
     elif wav.size(0) > target_len:
         wav = wav[:target_len]
 
-    # Mel spectrogram
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=cfg["sample_rate"],
-        n_fft=cfg["n_fft"],
-        hop_length=cfg["hop_length"],
-        win_length=cfg["win_length"],
-        n_mels=cfg["n_mels"],
-    )
-    features = mel_transform(wav)
+    # Feature extraction (must match training)
+    feature_type = cfg.get("feature_type", "melspectrogram")
+    if feature_type == "mfcc":
+        transform = torchaudio.transforms.MFCC(
+            sample_rate=cfg["sample_rate"], n_mfcc=40,
+            melkwargs={"n_fft": cfg["n_fft"], "hop_length": cfg["hop_length"],
+                       "win_length": cfg["win_length"], "n_mels": cfg["n_mels"]},
+        )
+    else:
+        transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=cfg["sample_rate"],
+            n_fft=cfg["n_fft"],
+            hop_length=cfg["hop_length"],
+            win_length=cfg["win_length"],
+            n_mels=cfg["n_mels"],
+        )
+    features = transform(wav)
     features = torch.log(features + 1e-9)
 
     return features

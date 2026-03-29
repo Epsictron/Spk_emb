@@ -105,7 +105,7 @@ class EMAMemoryBank:
             step: current step
 
         Returns:
-            dict with m_self, f_self, m_mix, f_mix scores and recommended_ratio
+            dict with m_self, f_self, m_mix, f_mix (raw + EMA-smoothed)
         """
         emb_norm = F.normalize(embeddings.float(), dim=1)
 
@@ -225,11 +225,11 @@ class EMAMemoryBank:
         }
 
     def load_state_dict(self, state):
-        """For checkpoint loading."""
+        """For checkpoint loading (backward compatible with older checkpoints)."""
         self.bank = state["bank"].to(self.bank.device)
         self.last_seen = state["last_seen"].to(self.last_seen.device)
         self.initialized = state["initialized"].to(self.initialized.device)
-        self.ema_m_self = state["ema_m_self"]
-        self.ema_f_self = state["ema_f_self"]
-        self.ema_m_mix = state["ema_m_mix"]
-        self.ema_f_mix = state["ema_f_mix"]
+        self.ema_m_self = state.get("ema_m_self", 0.0)
+        self.ema_f_self = state.get("ema_f_self", 0.0)
+        self.ema_m_mix = state.get("ema_m_mix", 0.0)
+        self.ema_f_mix = state.get("ema_f_mix", 0.0)

@@ -192,7 +192,7 @@ def find_lr(encoder, criterion, train_loader, optimizer, device, use_amp,
         feats, labels = feats.to(device), labels.to(device)
 
         optimizer.zero_grad()
-        with autocast(device_type="cuda", enabled=use_amp):
+        with autocast(device_type=device.type, enabled=use_amp):
             emb = encoder(feats)
             loss = criterion(emb, labels)
 
@@ -275,7 +275,7 @@ def run_validation(encoder, criterion, val_loader, device, use_amp, loss_type):
     with torch.no_grad():
         for feats, labels, _gender_idx in val_loader:
             feats, labels = feats.to(device), labels.to(device)
-            with autocast(device_type="cuda", enabled=use_amp):
+            with autocast(device_type=device.type, enabled=use_amp):
                 embeddings = encoder(feats)
                 loss = criterion(embeddings, labels)
             val_loss_sum += loss.item() * labels.size(0)
@@ -384,6 +384,7 @@ def train(config_path, checkpoint=None):
         worker_seed = seed + worker_id
         random.seed(worker_seed)
         np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
 
     # Sampler: gender-balanced speaker batch sampler
     batch_sampler = SpeakerBatchSampler(
@@ -467,12 +468,26 @@ def train(config_path, checkpoint=None):
     # Resume from checkpoint
     if checkpoint and os.path.isfile(checkpoint):
         print(f"Loading checkpoint: {checkpoint}")
-        ckpt = torch.load(checkpoint, map_location=device)
-        encoder.load_state_dict(ckpt["encoder"])
-        criterion.load_state_dict(ckpt["criterion"])
-        optimizer.load_state_dict(ckpt["optimizer"])
+        ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
+        missing, unexpected = encoder.load_state_dict(ckpt["encoder"], strict=False)
+        if missing:
+            print(f"  [WARN] Missing keys in encoder: {missing}")
+        if unexpected:
+            print(f"  [WARN] Unexpected keys in encoder: {unexpected}")
+        missing_c, unexpected_c = criterion.load_state_dict(ckpt["criterion"], strict=False)
+        if missing_c:
+            print(f"  [WARN] Missing keys in criterion: {missing_c}")
+        if unexpected_c:
+            print(f"  [WARN] Unexpected keys in criterion: {unexpected_c}")
+        try:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        except (ValueError, KeyError) as e:
+            print(f"  [WARN] Could not restore optimizer state: {e}")
         if "scaler" in ckpt and use_amp:
             scaler.load_state_dict(ckpt["scaler"])
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+            print("  Restored LR scheduler")
         if "ema_bank" in ckpt:
             ema_bank.load_state_dict(ckpt["ema_bank"])
             print("  Restored EMA memory bank")
@@ -548,7 +563,7 @@ def train(config_path, checkpoint=None):
     sanity_feats, sanity_labels, sanity_genders = next(sanity_iter)
     sanity_feats, sanity_labels = sanity_feats.to(device), sanity_labels.to(device)
     with torch.no_grad():
-        with autocast(device_type="cuda", enabled=use_amp):
+        with autocast(device_type=device.type, enabled=use_amp):
             sanity_emb = encoder(sanity_feats)
             sanity_loss = criterion(sanity_emb, sanity_labels)
     assert not torch.isnan(sanity_loss), "Sanity check FAILED: NaN loss on first train batch"
@@ -599,7 +614,7 @@ def train(config_path, checkpoint=None):
         gender_indices = gender_indices.to(device)
 
         optimizer.zero_grad()
-        with autocast(device_type="cuda", enabled=use_amp):
+        with autocast(device_type=device.type, enabled=use_amp):
             embeddings = encoder(feats)
             loss = criterion(embeddings, labels)
 
@@ -732,6 +747,7 @@ def train(config_path, checkpoint=None):
                     "encoder": encoder.state_dict(),
                     "criterion": criterion.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
                     "val_loss": val_loss,
                     "ema_bank": ema_bank.state_dict(),
                 }
@@ -749,6 +765,7 @@ def train(config_path, checkpoint=None):
                 "encoder": encoder.state_dict(),
                 "criterion": criterion.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
                 "val_loss": best_val_loss,
                 "ema_bank": ema_bank.state_dict(),
             }

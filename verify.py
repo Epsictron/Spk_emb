@@ -118,10 +118,9 @@ def main():
     diag = bank.compute_diagnostics(fake_emb, fake_labels, fake_genders, step=1)
     assert "m_self" in diag and "f_self" in diag
     assert "m_mix" in diag and "f_mix" in diag
-    assert "recommended_ratio" in diag
-    assert diag["recommended_ratio"] in [30, 40, 50, 60, 70]
+    assert "ema_m_self" in diag and "ema_f_self" in diag
     print(f"[OK] EMA diagnostics: Ms={diag['m_self']:.4f} Fs={diag['f_self']:.4f} "
-          f"Mm={diag['m_mix']:.4f} Fm={diag['f_mix']:.4f} ratio={diag['recommended_ratio']}%M")
+          f"Mm={diag['m_mix']:.4f} Fm={diag['f_mix']:.4f}")
 
     # Test state_dict / load_state_dict
     sd = bank.state_dict()
@@ -132,10 +131,6 @@ def main():
     bank2.load_state_dict(sd)
     assert bank2.initialized.sum().item() == 4
     print("[OK] EMA bank save/load state_dict")
-
-    # Test set_ratio on sampler
-    spk_sampler.set_ratio(60)
-    print("[OK] SpeakerBatchSampler.set_ratio(60) works")
 
     print("\n=== All checks passed ===")
 

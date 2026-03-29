@@ -11,7 +11,6 @@
     "min_duration": 1.0,
     "min_samples_per_speaker": 4,
     "embedding_dim": 256,
-    "num_speakers": 100,
     "speakers_per_batch": 100,
     "samples_per_speaker": 4,
     "max_steps": 100000,
