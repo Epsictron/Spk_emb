@@ -176,6 +176,49 @@ def load_manifest(path):
         return json.load(f)
 
 
+def filter_manifest(manifest, min_duration=0.0, min_samples_per_speaker=0):
+    """Filter manifest: remove short utterances and speakers with too few samples.
+
+    Args:
+        manifest: list of entries
+        min_duration: minimum utterance duration in seconds (0 = no filter)
+        min_samples_per_speaker: minimum utterances per speaker (0 = no filter)
+
+    Returns:
+        filtered manifest (list of entries)
+    """
+    before = len(manifest)
+    before_spks = len(set(e["speaker_id"] for e in manifest))
+
+    # Step 1: filter short utterances
+    if min_duration > 0:
+        manifest = [e for e in manifest if e.get("duration", float("inf")) >= min_duration]
+        after_dur = len(manifest)
+        print(f"  Duration filter (>= {min_duration}s): {before} -> {after_dur} utterances "
+              f"(removed {before - after_dur})")
+
+    # Step 2: filter speakers with too few samples
+    if min_samples_per_speaker > 0:
+        spk_counts = {}
+        for e in manifest:
+            spk_counts[e["speaker_id"]] = spk_counts.get(e["speaker_id"], 0) + 1
+
+        valid_spks = {s for s, c in spk_counts.items() if c >= min_samples_per_speaker}
+        removed_spks = {s for s, c in spk_counts.items() if c < min_samples_per_speaker}
+        before_step2 = len(manifest)
+        manifest = [e for e in manifest if e["speaker_id"] in valid_spks]
+
+        print(f"  Speaker filter (>= {min_samples_per_speaker} samples): "
+              f"removed {len(removed_spks)} speakers, "
+              f"{before_step2} -> {len(manifest)} utterances")
+
+    after_spks = len(set(e["speaker_id"] for e in manifest))
+    print(f"  Filter summary: {before_spks} -> {after_spks} speakers, "
+          f"{before} -> {len(manifest)} utterances")
+
+    return manifest
+
+
 def split_manifest(manifest, val_split=0.1):
     """Split manifest by speaker, gender-balanced (equal male/female in val)."""
     spk_to_entries = {}

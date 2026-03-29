@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.amp import GradScaler, autocast
 
-from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, split_manifest
+from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, filter_manifest, split_manifest
 from model import SpeakerEncoder
 from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 from ema_bank import EMAMemoryBank
@@ -324,6 +324,14 @@ def train(config_path, checkpoint=None):
 
     # Data
     manifest = load_manifest(cfg["manifest_path"])
+
+    # Filter short utterances and speakers with too few samples
+    min_dur = cfg.get("min_duration", 0.0)
+    min_sps = cfg.get("min_samples_per_speaker", 0)
+    if min_dur > 0 or min_sps > 0:
+        print("Filtering manifest:")
+        manifest = filter_manifest(manifest, min_duration=min_dur, min_samples_per_speaker=min_sps)
+
     train_manifest, val_manifest = split_manifest(manifest, cfg.get("val_split", 0.1))
     print(f"Train: {len(train_manifest)}, Val: {len(val_manifest)}")
 
