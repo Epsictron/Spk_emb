@@ -187,34 +187,72 @@ def filter_manifest(manifest, min_duration=0.0, min_samples_per_speaker=0):
     Returns:
         filtered manifest (list of entries)
     """
-    before = len(manifest)
-    before_spks = len(set(e["speaker_id"] for e in manifest))
+    before_utts = len(manifest)
+    before_spks = set(e["speaker_id"] for e in manifest)
+
+    # Gender counts before
+    spk_gender_before = {}
+    for e in manifest:
+        sid = e["speaker_id"]
+        if sid not in spk_gender_before:
+            spk_gender_before[sid] = e.get("gender", "").lower()
+    male_before = sum(1 for g in spk_gender_before.values() if g == "male")
+    female_before = sum(1 for g in spk_gender_before.values() if g == "female")
+
+    print(f"\n{'─' * 60}")
+    print(f"  MANIFEST FILTERING")
+    print(f"{'─' * 60}")
+    print(f"  Before: {len(before_spks)} speakers ({male_before}M + {female_before}F), "
+          f"{before_utts} utterances")
 
     # Step 1: filter short utterances
     if min_duration > 0:
+        removed_short = [e for e in manifest if e.get("duration", float("inf")) < min_duration]
         manifest = [e for e in manifest if e.get("duration", float("inf")) >= min_duration]
-        after_dur = len(manifest)
-        print(f"  Duration filter (>= {min_duration}s): {before} -> {after_dur} utterances "
-              f"(removed {before - after_dur})")
+        print(f"\n  Duration filter (>= {min_duration}s):")
+        print(f"    Removed {len(removed_short)} short utterances")
+        print(f"    Remaining: {len(manifest)} utterances")
 
     # Step 2: filter speakers with too few samples
     if min_samples_per_speaker > 0:
         spk_counts = {}
+        spk_gender = {}
         for e in manifest:
-            spk_counts[e["speaker_id"]] = spk_counts.get(e["speaker_id"], 0) + 1
+            sid = e["speaker_id"]
+            spk_counts[sid] = spk_counts.get(sid, 0) + 1
+            if sid not in spk_gender:
+                spk_gender[sid] = e.get("gender", "").lower()
 
-        valid_spks = {s for s, c in spk_counts.items() if c >= min_samples_per_speaker}
         removed_spks = {s for s, c in spk_counts.items() if c < min_samples_per_speaker}
-        before_step2 = len(manifest)
+        valid_spks = {s for s, c in spk_counts.items() if c >= min_samples_per_speaker}
+        removed_male = sum(1 for s in removed_spks if spk_gender.get(s) == "male")
+        removed_female = sum(1 for s in removed_spks if spk_gender.get(s) == "female")
+        removed_utts = sum(spk_counts[s] for s in removed_spks)
+
         manifest = [e for e in manifest if e["speaker_id"] in valid_spks]
 
-        print(f"  Speaker filter (>= {min_samples_per_speaker} samples): "
-              f"removed {len(removed_spks)} speakers, "
-              f"{before_step2} -> {len(manifest)} utterances")
+        print(f"\n  Speaker filter (>= {min_samples_per_speaker} samples):")
+        print(f"    Dropped {len(removed_spks)} speakers ({removed_male}M + {removed_female}F)")
+        print(f"    Dropped {removed_utts} utterances from those speakers")
+        print(f"    Remaining: {len(valid_spks)} speakers, {len(manifest)} utterances")
 
-    after_spks = len(set(e["speaker_id"] for e in manifest))
-    print(f"  Filter summary: {before_spks} -> {after_spks} speakers, "
-          f"{before} -> {len(manifest)} utterances")
+    # Final summary
+    after_spks = set(e["speaker_id"] for e in manifest)
+    spk_gender_after = {}
+    for e in manifest:
+        sid = e["speaker_id"]
+        if sid not in spk_gender_after:
+            spk_gender_after[sid] = e.get("gender", "").lower()
+    male_after = sum(1 for g in spk_gender_after.values() if g == "male")
+    female_after = sum(1 for g in spk_gender_after.values() if g == "female")
+
+    dropped_spks = before_spks - after_spks
+    dropped_utts = before_utts - len(manifest)
+
+    print(f"\n  After:  {len(after_spks)} speakers ({male_after}M + {female_after}F), "
+          f"{len(manifest)} utterances")
+    print(f"  Total dropped: {len(dropped_spks)} speakers, {dropped_utts} utterances")
+    print(f"{'─' * 60}\n")
 
     return manifest
 
