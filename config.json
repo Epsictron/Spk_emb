@@ -25,6 +25,10 @@
     "_comment_model": "--- MODEL ---",
     "embedding_dim": 256,
     "_comment_emb": "Speaker embedding dimension. Model output is L2-normalized to this size",
+    "left_context_ms": 100,
+    "_comment_left_ctx": "Left context in milliseconds. Conv layers see this much past audio. 0 = minimal context",
+    "right_context_ms": 0,
+    "_comment_right_ctx": "Right context in milliseconds. 0 = fully causal (no future frames). >0 = non-causal",
 
     "_comment_training": "--- TRAINING ---",
     "speakers_per_batch": 100,

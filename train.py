@@ -402,7 +402,19 @@ def train(config_path, checkpoint=None):
     )
 
     # Model
-    encoder = SpeakerEncoder(cfg["n_mels"], cfg["embedding_dim"]).to(device)
+    # Compute context in frames from ms
+    frame_ms = cfg["hop_length"] / cfg["sample_rate"] * 1000
+    left_context_frames = int(cfg.get("left_context_ms", 100) / frame_ms)
+    right_context_frames = int(cfg.get("right_context_ms", 0) / frame_ms)
+    print(f"  Context: left={cfg.get('left_context_ms', 100)}ms ({left_context_frames} frames), "
+          f"right={cfg.get('right_context_ms', 0)}ms ({right_context_frames} frames)")
+
+    encoder = SpeakerEncoder(
+        n_mels=cfg["n_mels"],
+        embedding_dim=cfg["embedding_dim"],
+        left_context_frames=left_context_frames,
+        right_context_frames=right_context_frames,
+    ).to(device)
 
     # Loss
     loss_type = cfg.get("loss_type", "aam")

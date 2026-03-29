@@ -24,7 +24,17 @@ def main():
     print(f"[OK] Manifest has {len(manifest)} entries with all required fields")
 
     # 3. Model forward pass
-    encoder = SpeakerEncoder(n_mels=cfg["n_mels"], embedding_dim=cfg["embedding_dim"])
+    # Compute context in frames from ms
+    frame_ms = cfg["hop_length"] / cfg["sample_rate"] * 1000
+    left_context_frames = int(cfg.get("left_context_ms", 100) / frame_ms)
+    right_context_frames = int(cfg.get("right_context_ms", 0) / frame_ms)
+
+    encoder = SpeakerEncoder(
+        n_mels=cfg["n_mels"],
+        embedding_dim=cfg["embedding_dim"],
+        left_context_frames=left_context_frames,
+        right_context_frames=right_context_frames,
+    )
     dummy = torch.randn(4, cfg["n_mels"], 300)  # (B, n_mels, T)
     emb = encoder(dummy)
     assert emb.shape == (4, cfg["embedding_dim"])

@@ -22,7 +22,17 @@ def load_model(checkpoint_path, config_path="config.json", device=None):
     with open(config_path) as f:
         cfg = json.load(f)
 
-    model = SpeakerEncoder(cfg["n_mels"], cfg["embedding_dim"]).to(device)
+    # Compute context in frames from ms
+    frame_ms = cfg["hop_length"] / cfg["sample_rate"] * 1000
+    left_context_frames = int(cfg.get("left_context_ms", 100) / frame_ms)
+    right_context_frames = int(cfg.get("right_context_ms", 0) / frame_ms)
+
+    model = SpeakerEncoder(
+        n_mels=cfg["n_mels"],
+        embedding_dim=cfg["embedding_dim"],
+        left_context_frames=left_context_frames,
+        right_context_frames=right_context_frames,
+    ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["encoder"])
