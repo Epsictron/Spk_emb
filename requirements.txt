@@ -1,3 +1,4 @@
-torch
-torchaudio
-tensorboard
+torch>=2.0.0
+torchaudio>=2.0.0
+tensorboard>=2.14.0
+soundfile>=0.12.0
