@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, filter_manifest, split_manifest
+from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, filter_manifest
 
 
 def main():
@@ -32,11 +32,7 @@ def main():
         print("No entries after filtering. Check min_duration / min_samples_per_speaker.")
         return
 
-    # Split
-    train_manifest, val_manifest = split_manifest(manifest, cfg.get("val_split", 0.1))
-    print(f"Train: {len(train_manifest)} entries, Val: {len(val_manifest)} entries")
-
-    # Speaker mapping (shared)
+    # Speaker mapping
     all_speakers = sorted(set(e["speaker_id"] for e in manifest))
     spk2label = {s: i for i, s in enumerate(all_speakers)}
     label2spk = {i: s for s, i in spk2label.items()}
@@ -44,14 +40,14 @@ def main():
 
     # Dataset
     ds = SpeakerDataset(
-        train_manifest, cfg["sample_rate"], cfg["segment_duration"],
+        manifest, cfg["sample_rate"], cfg["segment_duration"],
         cfg["feature_type"], cfg["n_mels"], cfg["n_fft"],
         cfg["hop_length"], cfg["win_length"], spk2label=spk2label,
     )
 
     # Batch sampler
     sampler = SpeakerBatchSampler(
-        train_manifest, cfg["speakers_per_batch"], cfg["samples_per_speaker"]
+        manifest, cfg["speakers_per_batch"], cfg["samples_per_speaker"]
     )
 
     loader = DataLoader(ds, batch_sampler=sampler, num_workers=0)
@@ -83,7 +79,6 @@ def main():
 
         # Unique speakers and gender breakdown
         unique_labels = labels.unique()
-        unique_genders = genders.unique()
         n_male = (genders == 0).sum().item()
         n_female = (genders == 1).sum().item()
         print(f"\nUnique speakers in batch: {len(unique_labels)}")
@@ -101,7 +96,7 @@ def main():
         print(f"\nSample entries from manifest (first 5 in batch):")
         batch_indices = list(sampler)[0][:5]
         for idx in batch_indices:
-            e = train_manifest[idx]
+            e = manifest[idx]
             print(f"  idx={idx}: {e['audio_file_path']} | spk={e['speaker_id']} | "
                   f"dur={e.get('duration', '?')}s | gender={e.get('gender', '?')}")
 

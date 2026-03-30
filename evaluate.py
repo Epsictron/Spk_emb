@@ -7,7 +7,6 @@ Computes 5 cosine similarity distributions from a held-out manifest:
 Logs mean, variance, 95% coverage bounds, and separation metric.
 """
 
-import json
 import random
 
 import numpy as np
@@ -127,14 +126,6 @@ def _extract_embeddings(model, manifest, cfg, device, max_samples_per_speaker=10
 
     return spk_embeddings, spk_genders
 
-
-def _pairwise_cosine(a, b):
-    """Cosine similarity between all pairs in a and b. Returns 1D tensor."""
-    # a: (N, D), b: (M, D) -> (N, M)
-    a = F.normalize(a, dim=1, eps=1e-8)
-    b = F.normalize(b, dim=1, eps=1e-8)
-    sim = torch.mm(a, b.t())
-    return sim.flatten()
 
 
 def _within_speaker_sims(embeddings):
