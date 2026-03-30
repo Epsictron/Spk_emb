@@ -121,8 +121,9 @@ def train(config_path, checkpoint=None):
                         spec_augment=cfg.get("spec_augment", False))
     sampler = SpeakerBatchSampler(manifest, cfg["speakers_per_batch"],
                                   cfg["samples_per_speaker"])
-    loader = DataLoader(ds, batch_sampler=sampler, num_workers=cfg["num_workers"],
-                        pin_memory=True)
+    nw = cfg.get("num_workers", 4)
+    loader = DataLoader(ds, batch_sampler=sampler, num_workers=nw,
+                        pin_memory=True, persistent_workers=nw > 0)
 
     # Test manifest for evaluation
     test_manifest_path = cfg.get("test_manifest_path", "")
