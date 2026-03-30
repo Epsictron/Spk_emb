@@ -116,7 +116,9 @@ def train(config_path, checkpoint=None):
 
     ds = SpeakerDataset(manifest, cfg["sample_rate"], cfg["segment_duration"],
                         cfg["n_mels"], cfg["n_fft"], cfg["hop_length"],
-                        cfg["win_length"], spk2label)
+                        cfg["win_length"], spk2label,
+                        speed_perturb=cfg.get("speed_perturb", False),
+                        spec_augment=cfg.get("spec_augment", False))
     sampler = SpeakerBatchSampler(manifest, cfg["speakers_per_batch"],
                                   cfg["samples_per_speaker"])
     loader = DataLoader(ds, batch_sampler=sampler, num_workers=cfg["num_workers"],
@@ -137,22 +139,27 @@ def train(config_path, checkpoint=None):
     encoder = SpeakerEncoder(cfg["n_mels"], cfg["embedding_dim"]).to(device)
     criterion = AAMSoftmaxLoss(cfg["embedding_dim"], ds.num_speakers,
                                cfg.get("aam_margin", 0.2),
-                               cfg.get("aam_scale", 30)).to(device)
+                               cfg.get("aam_scale", 30),
+                               cfg.get("label_smoothing", 0.0)).to(device)
 
     params = list(encoder.parameters()) + list(criterion.parameters())
     optimizer = torch.optim.Adam(params, lr=cfg["lr"])
 
     max_steps = cfg["max_steps"]
     warmup_steps = cfg.get("warmup_steps", 0)
+    restart_period = cfg.get("restart_period", max_steps)
 
     def lr_lambda(step):
         if step < warmup_steps:
             return (step + 1) / (warmup_steps + 1)
-        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+        t = step - warmup_steps
+        period = restart_period
+        progress = (t % period) / max(1, period)
         return 0.5 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     grad_clip = cfg.get("grad_clip", 0)
+    accum_steps = cfg.get("accumulation_steps", 1)
     val_interval = cfg.get("val_interval", 2000)
     log_interval = cfg.get("log_interval", 50)
     start_step = 1
@@ -180,7 +187,10 @@ def train(config_path, checkpoint=None):
     print(f"\n{'=' * 50}")
     print(f"  Device: {device} | Params: {total_params:,}")
     print(f"  Batch: {batch_size} ({cfg['speakers_per_batch']}spk x {cfg['samples_per_speaker']}samp)")
+    print(f"  Accum: {accum_steps} | Effective batch: {batch_size * accum_steps}")
     print(f"  Steps: {max_steps} | LR: {cfg['lr']} | Warmup: {warmup_steps}")
+    print(f"  Restart period: {restart_period} | Label smoothing: {cfg.get('label_smoothing', 0.0)}")
+    print(f"  Speed perturb: {cfg.get('speed_perturb', False)} | SpecAugment: {cfg.get('spec_augment', False)}")
     print(f"  Eval every: {val_interval} | Log every: {log_interval}")
     print(f"{'=' * 50}\n")
 
@@ -202,26 +212,33 @@ def train(config_path, checkpoint=None):
     t_log = time.time()
 
     for step in range(start_step, max_steps + 1):
-        feats, labels, _ = next(data_iter)
-        feats, labels = feats.to(device), labels.to(device)
-
+        # Gradient accumulation loop
         optimizer.zero_grad()
-        emb = encoder(feats)
-        loss = criterion(emb, labels)
+        step_loss = 0.0
+        step_total = 0
+        for _ in range(accum_steps):
+            feats, labels, _ = next(data_iter)
+            feats, labels = feats.to(device), labels.to(device)
+            emb = encoder(feats)
+            loss = criterion(emb, labels) / accum_steps
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+            loss.backward()
+            step_loss += loss.item() * accum_steps * labels.size(0)
+            step_total += labels.size(0)
 
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"  [WARN] Step {step}: NaN/Inf loss, skipping")
+        if step_total == 0:
+            print(f"  [WARN] Step {step}: all sub-batches NaN, skipping")
             scheduler.step()
             continue
 
-        loss.backward()
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         optimizer.step()
         scheduler.step()
 
-        running_loss += loss.item() * labels.size(0)
-        running_total += labels.size(0)
+        running_loss += step_loss
+        running_total += step_total
 
         if step % log_interval == 0:
             avg = running_loss / running_total

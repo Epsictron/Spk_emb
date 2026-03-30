@@ -19,9 +19,15 @@
     "max_steps": 50000,
     "lr": 0.001,
     "warmup_steps": 500,
+    "restart_period": 10000,
     "grad_clip": 5.0,
+    "accumulation_steps": 1,
     "aam_margin": 0.2,
     "aam_scale": 30,
+    "label_smoothing": 0.1,
+
+    "speed_perturb": true,
+    "spec_augment": true,
 
     "val_interval": 2000,
     "log_interval": 50,

@@ -32,16 +32,27 @@ def filter_manifest(manifest, min_duration=0.0, min_samples_per_speaker=0):
 
 class SpeakerDataset(Dataset):
     def __init__(self, entries, sample_rate, segment_duration, n_mels, n_fft,
-                 hop_length, win_length, spk2label):
+                 hop_length, win_length, spk2label,
+                 speed_perturb=False, spec_augment=False):
         self.entries = entries
         self.sample_rate = sample_rate
         self.segment_len = int(sample_rate * segment_duration)
         self.spk2label = spk2label
         self.num_speakers = len(spk2label)
+        self.speed_perturb = speed_perturb
+        self.speed_factors = [0.9, 1.0, 1.1]
         self.feature_fn = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate, n_fft=n_fft,
             hop_length=hop_length, win_length=win_length, n_mels=n_mels,
         )
+        # SpecAugment: freq + time masking
+        if spec_augment:
+            self.spec_aug = torch.nn.Sequential(
+                torchaudio.transforms.FrequencyMasking(freq_mask_param=10),
+                torchaudio.transforms.TimeMasking(time_mask_param=20),
+            )
+        else:
+            self.spec_aug = None
 
     def __len__(self):
         return len(self.entries)
@@ -55,6 +66,13 @@ class SpeakerDataset(Dataset):
             wav = wav.mean(dim=0, keepdim=True)
         wav = wav.squeeze(0)
 
+        # Speed perturbation (before cropping)
+        if self.speed_perturb:
+            factor = random.choice(self.speed_factors)
+            if factor != 1.0:
+                wav = torchaudio.functional.resample(wav, self.sample_rate,
+                                                     int(self.sample_rate * factor))
+
         if wav.size(0) > self.segment_len:
             start = random.randint(0, wav.size(0) - self.segment_len)
             wav = wav[start:start + self.segment_len]
@@ -63,6 +81,11 @@ class SpeakerDataset(Dataset):
             wav = wav.repeat(repeats)[:self.segment_len]
 
         features = torch.log(self.feature_fn(wav) + 1e-9)
+
+        # SpecAugment (after feature extraction)
+        if self.spec_aug is not None:
+            features = self.spec_aug(features)
+
         label = self.spk2label[entry["speaker_id"]]
         gender_idx = 0 if entry.get("gender", "").lower() == "male" else 1
         return features, label, gender_idx
