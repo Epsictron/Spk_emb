@@ -14,35 +14,66 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
+from torch.utils.data import Dataset, DataLoader
 from scipy.stats import gaussian_kde
 
 
+class _EvalDataset(Dataset):
+    """Lightweight dataset for evaluation: loads audio, extracts features."""
+
+    def __init__(self, entries, cfg):
+        self.entries = entries
+        self.sample_rate = cfg["sample_rate"]
+        self.segment_len = int(self.sample_rate * cfg["segment_duration"])
+
+        feature_type = cfg.get("feature_type", "melspectrogram")
+        if feature_type == "mfcc":
+            self.transform = torchaudio.transforms.MFCC(
+                sample_rate=self.sample_rate, n_mfcc=40,
+                melkwargs={"n_fft": cfg["n_fft"], "hop_length": cfg["hop_length"],
+                           "win_length": cfg["win_length"], "n_mels": cfg["n_mels"]},
+            )
+        else:
+            self.transform = torchaudio.transforms.MelSpectrogram(
+                sample_rate=self.sample_rate, n_fft=cfg["n_fft"],
+                hop_length=cfg["hop_length"], win_length=cfg["win_length"],
+                n_mels=cfg["n_mels"],
+            )
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __getitem__(self, idx):
+        entry = self.entries[idx]
+        wav, sr = torchaudio.load(entry["audio_file_path"])
+
+        if sr != self.sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.squeeze(0)
+
+        # Fixed segment: crop or loop-repeat
+        if wav.size(0) > self.segment_len:
+            start = random.randint(0, wav.size(0) - self.segment_len)
+            wav = wav[start:start + self.segment_len]
+        elif wav.size(0) < self.segment_len:
+            repeats = self.segment_len // wav.size(0) + 1
+            wav = wav.repeat(repeats)[:self.segment_len]
+
+        feat = self.transform(wav)
+        feat = torch.log(feat + 1e-9)  # (n_mels, T)
+        return feat, idx  # return idx to map back to speaker
+
+
 def _extract_embeddings(model, manifest, cfg, device, max_samples_per_speaker=10):
-    """Extract L2-normalized embeddings grouped by speaker.
+    """Extract L2-normalized embeddings grouped by speaker using DataLoader.
 
     Returns:
         spk_embeddings: dict {speaker_id: tensor (N, emb_dim)}
         spk_genders:    dict {speaker_id: "male" or "female"}
     """
-    sample_rate = cfg["sample_rate"]
-    segment_len = int(sample_rate * cfg["segment_duration"])
-
-    # Feature extractor
-    feature_type = cfg.get("feature_type", "melspectrogram")
-    if feature_type == "mfcc":
-        transform = torchaudio.transforms.MFCC(
-            sample_rate=sample_rate, n_mfcc=40,
-            melkwargs={"n_fft": cfg["n_fft"], "hop_length": cfg["hop_length"],
-                       "win_length": cfg["win_length"], "n_mels": cfg["n_mels"]},
-        )
-    else:
-        transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate, n_fft=cfg["n_fft"],
-            hop_length=cfg["hop_length"], win_length=cfg["win_length"],
-            n_mels=cfg["n_mels"],
-        )
-
-    # Group manifest entries by speaker
+    # Group manifest entries by speaker, cap per speaker
     spk_entries = {}
     spk_genders = {}
     for entry in manifest:
@@ -51,51 +82,48 @@ def _extract_embeddings(model, manifest, cfg, device, max_samples_per_speaker=10
         if sid not in spk_genders:
             spk_genders[sid] = entry.get("gender", "").lower()
 
-    # Cap samples per speaker
     for sid in spk_entries:
         entries = spk_entries[sid]
         if len(entries) > max_samples_per_speaker:
             spk_entries[sid] = random.sample(entries, max_samples_per_speaker)
 
-    # Extract embeddings
-    spk_embeddings = {}
+    # Flatten into a single list with speaker tracking
+    flat_entries = []
+    flat_spk_ids = []
+    for sid, entries in spk_entries.items():
+        for entry in entries:
+            flat_entries.append(entry)
+            flat_spk_ids.append(sid)
+
+    # DataLoader for parallel audio loading
+    eval_ds = _EvalDataset(flat_entries, cfg)
+    num_workers = min(cfg.get("num_workers", 4), 4)
+    eval_loader = DataLoader(
+        eval_ds, batch_size=64, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+    )
+
+    # Batch inference
+    all_embeddings = []
     model.eval()
     with torch.no_grad():
-        for sid, entries in spk_entries.items():
-            feats_list = []
-            for entry in entries:
-                try:
-                    wav, sr = torchaudio.load(entry["audio_file_path"])
-                except Exception as e:
-                    print(f"  [WARN] Failed to load {entry['audio_file_path']}: {e}")
-                    continue
+        for feats, indices in eval_loader:
+            feats = feats.to(device)
+            embs = model(feats)
+            embs = F.normalize(embs.float(), dim=1, eps=1e-8)
+            all_embeddings.append(embs.cpu())
 
-                if sr != sample_rate:
-                    wav = torchaudio.functional.resample(wav, sr, sample_rate)
-                if wav.shape[0] > 1:
-                    wav = wav.mean(dim=0, keepdim=True)
-                wav = wav.squeeze(0)
+    all_embeddings = torch.cat(all_embeddings, dim=0)  # (total_samples, emb_dim)
 
-                # Fixed segment: crop or loop-repeat
-                if wav.size(0) > segment_len:
-                    start = random.randint(0, wav.size(0) - segment_len)
-                    wav = wav[start:start + segment_len]
-                elif wav.size(0) < segment_len:
-                    repeats = segment_len // wav.size(0) + 1
-                    wav = wav.repeat(repeats)[:segment_len]
+    # Group embeddings back by speaker
+    spk_embeddings = {}
+    for i, sid in enumerate(flat_spk_ids):
+        if sid not in spk_embeddings:
+            spk_embeddings[sid] = []
+        spk_embeddings[sid].append(all_embeddings[i])
 
-                feat = transform(wav)
-                feat = torch.log(feat + 1e-9)  # (n_mels, T)
-                feats_list.append(feat)
-
-            if len(feats_list) == 0:
-                continue
-
-            # Batch forward pass for this speaker
-            batch = torch.stack(feats_list).to(device)  # (N, n_mels, T)
-            embs = model(batch)
-            embs = F.normalize(embs.float(), dim=1, eps=1e-8)  # (N, emb_dim)
-            spk_embeddings[sid] = embs.cpu()
+    for sid in spk_embeddings:
+        spk_embeddings[sid] = torch.stack(spk_embeddings[sid])
 
     return spk_embeddings, spk_genders
 
