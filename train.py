@@ -15,11 +15,12 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.amp import GradScaler, autocast
 
-from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, filter_manifest, split_manifest
+from dataset import SpeakerDataset, SpeakerBatchSampler, load_manifest, filter_manifest
 from model import SpeakerEncoder
 from losses import AAMSoftmaxLoss, PrototypicalLoss, ContrastiveLoss, CombinedLoss
 from ema_bank import EMAMemoryBank
 from augmentation import WavAugmentor, SpecAugmentor
+from evaluate import evaluate
 
 
 def snapshot_codebase(output_dir):
@@ -68,9 +69,6 @@ def validate_config(cfg):
     lr = cfg.get("lr", 0.001)
     if lr <= 0 or lr > 1:
         errors.append(f"lr={lr} looks wrong. Expected 0 < lr <= 1")
-
-    if cfg.get("val_split", 0.1) <= 0 or cfg.get("val_split", 0.1) >= 1:
-        errors.append("val_split must be between 0 and 1 (exclusive)")
 
     # Loss type
     valid_losses = ("aam", "prototypical", "contrastive", "combined")
@@ -265,37 +263,6 @@ def infinite_loader(data_loader):
             yield batch
 
 
-def run_validation(encoder, criterion, val_loader, device, use_amp, loss_type):
-    """Run validation and return loss, accuracy, time."""
-    val_start = time.time()
-    encoder.eval()
-    criterion.eval()
-    val_loss_sum, val_total, val_correct = 0.0, 0, 0
-
-    with torch.no_grad():
-        for feats, labels, _gender_idx in val_loader:
-            feats, labels = feats.to(device), labels.to(device)
-            with autocast(device_type=device.type, enabled=use_amp):
-                embeddings = encoder(feats)
-                loss = criterion(embeddings, labels)
-            val_loss_sum += loss.item() * labels.size(0)
-            val_total += labels.size(0)
-
-            if loss_type in ("aam", "combined"):
-                w = criterion.weight if loss_type == "aam" else criterion.aam.weight
-                emb_norm = F.normalize(embeddings.float(), dim=1, eps=1e-8)
-                w_norm = F.normalize(w, dim=1, eps=1e-8)
-                preds = F.linear(emb_norm, w_norm).argmax(dim=1)
-                val_correct += (preds == labels).sum().item()
-
-    encoder.train()
-    criterion.train()
-
-    val_loss = val_loss_sum / max(val_total, 1)
-    val_acc = val_correct / max(val_total, 1) if loss_type in ("aam", "combined") else None
-    val_time = time.time() - val_start
-    return val_loss, val_acc, val_time
-
 
 def train(config_path, checkpoint=None):
     with open(config_path) as f:
@@ -332,11 +299,25 @@ def train(config_path, checkpoint=None):
         print("Filtering manifest:")
         manifest = filter_manifest(manifest, min_duration=min_dur, min_samples_per_speaker=min_sps)
 
-    train_manifest, val_manifest = split_manifest(manifest, cfg.get("val_split", 0.1))
-    print(f"Train: {len(train_manifest)}, Val: {len(val_manifest)}")
+    train_manifest = manifest
+    print(f"Train: {len(train_manifest)} entries")
 
-    # Build unified speaker-to-label mapping from full manifest
-    all_speakers = sorted(set(e["speaker_id"] for e in manifest))
+    # Load val manifest (separate file, already split by user)
+    val_manifest_path = cfg.get("val_manifest_path", "")
+    if val_manifest_path and os.path.isfile(val_manifest_path):
+        val_manifest = load_manifest(val_manifest_path)
+        val_manifest = filter_manifest(
+            val_manifest,
+            min_duration=min_dur,
+            min_samples_per_speaker=cfg.get("min_samples_per_speaker", 0),
+        )
+        print(f"Val: {len(val_manifest)} entries (from {val_manifest_path})")
+    else:
+        val_manifest = []
+        print("Val: no val_manifest_path configured, evaluation disabled")
+
+    # Build unified speaker-to-label mapping from train manifest
+    all_speakers = sorted(set(e["speaker_id"] for e in train_manifest))
     spk2label = {s: i for i, s in enumerate(all_speakers)}
     print(f"Total speakers: {len(spk2label)}")
 
@@ -373,12 +354,6 @@ def train(config_path, checkpoint=None):
         cfg["hop_length"], cfg["win_length"], spk2label=spk2label,
         wav_augmentor=wav_augmentor, spec_augmentor=spec_augmentor,
     )
-    val_ds = SpeakerDataset(
-        val_manifest, cfg["sample_rate"], cfg["segment_duration"],
-        cfg["feature_type"], cfg["n_mels"], cfg["n_fft"],
-        cfg["hop_length"], cfg["win_length"], spk2label=spk2label,
-    )
-
     # Worker init fn for reproducible augmentation across workers
     def worker_init_fn(worker_id):
         worker_seed = seed + worker_id
@@ -395,12 +370,6 @@ def train(config_path, checkpoint=None):
         num_workers=cfg["num_workers"], pin_memory=True,
         worker_init_fn=worker_init_fn,
     )
-    val_loader = DataLoader(
-        val_ds, batch_size=cfg["speakers_per_batch"] * cfg["samples_per_speaker"],
-        shuffle=False, num_workers=cfg["num_workers"], pin_memory=True,
-        worker_init_fn=worker_init_fn,
-    )
-
     # Model
     # Compute context in frames from ms
     frame_ms = cfg["hop_length"] / cfg["sample_rate"] * 1000
@@ -536,7 +505,7 @@ def train(config_path, checkpoint=None):
     tb_log_dir = os.path.join(cfg["output_dir"], "tb_logs", exp_name)
     writer = SummaryWriter(log_dir=tb_log_dir)
     print(f"TensorBoard: {tb_log_dir}")
-    best_val_loss = float("inf")
+    best_separation = float("-inf")
 
     # Print training summary
     batch_size = cfg["speakers_per_batch"] * cfg["samples_per_speaker"]
@@ -559,7 +528,7 @@ def train(config_path, checkpoint=None):
     print(f"  Log every:           {log_interval} steps")
     print(f"  Diag every:          {diag_interval} steps (after EMA warmup: {ema_warmup_steps})")
     print(f"  Train samples:       {len(train_manifest)}")
-    print(f"  Val samples:         {len(val_manifest)}")
+    print(f"  Val samples:         {len(val_manifest)} ({'enabled' if val_manifest else 'disabled'})")
     print(f"  Total speakers:      {len(spk2label)}")
     print(f"  Model params:        {total_params:,}")
     print(f"  Feature:             {cfg['feature_type']}")
@@ -581,10 +550,6 @@ def train(config_path, checkpoint=None):
     assert not torch.isnan(sanity_loss), "Sanity check FAILED: NaN loss on first train batch"
     print(f"  Train batch OK: loss={sanity_loss.item():.4f}, shape={sanity_emb.shape}")
 
-    val_loss, val_acc, val_time = run_validation(
-        encoder, criterion, val_loader, device, use_amp, loss_type
-    )
-    print(f"  Validation OK: loss={val_loss:.4f}" + (f", acc={val_acc:.4f}" if val_acc else ""))
     print("--- Sanity check passed, saving code snapshot ---\n")
 
     snapshot_codebase(cfg["output_dir"])
@@ -723,50 +688,47 @@ def train(config_path, checkpoint=None):
             running_total = 0
             step_start = time.time()
 
-        # Validation every N steps
-        if step % val_interval == 0:
-            val_loss, val_acc, val_time = run_validation(
-                encoder, criterion, val_loader, device, use_amp, loss_type
-            )
+        # Evaluation every N steps
+        if step % val_interval == 0 and val_manifest:
             elapsed = time.time() - training_start
             remaining = (elapsed / (step - start_step + 1)) * (max_steps - step)
 
             print(f"\n{'─' * 60}")
-            print(f"  VALIDATION @ Step {step}/{max_steps}")
+            print(f"  EVALUATION @ Step {step}/{max_steps}")
             print(f"{'─' * 60}")
-            print(f"  Val loss:     {val_loss:.4f}")
-            if val_acc is not None:
-                print(f"  Val accuracy: {val_acc:.4f}")
-            print(f"  Val time:     {val_time:.1f}s")
-            print(f"  Elapsed:      {elapsed/60:.1f}min | ETA: {remaining/60:.1f}min")
+            print(f"  Elapsed: {elapsed/60:.1f}min | ETA: {remaining/60:.1f}min")
 
-            # Print EMA bank status at validation time
+            # Print EMA bank status
             bank_stats = ema_bank.get_bank_stats()
-            print(f"  EMA bank:     {bank_stats['total_initialized']}/{bank_stats['total_speakers']} initialized "
+            print(f"  EMA bank: {bank_stats['total_initialized']}/{bank_stats['total_speakers']} initialized "
                   f"({bank_stats['male_initialized']}M + {bank_stats['female_initialized']}F)")
             if step >= ema_warmup_steps:
-                print(f"  Diag scores:  Ms={ema_bank.ema_m_self:.4f} Fs={ema_bank.ema_f_self:.4f} "
+                print(f"  Diag scores: Ms={ema_bank.ema_m_self:.4f} Fs={ema_bank.ema_f_self:.4f} "
                       f"Mm={ema_bank.ema_m_mix:.4f} Fm={ema_bank.ema_f_mix:.4f}")
 
-            writer.add_scalar("val/loss", val_loss, step)
-            if val_acc is not None:
-                writer.add_scalar("val/accuracy", val_acc, step)
+            # Run similarity evaluation
+            eval_results = evaluate(encoder, val_manifest, cfg, device, writer, step)
+            separation = eval_results["separation"]
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Back to training mode
+            encoder.train()
+            criterion.train()
+
+            if separation > best_separation:
+                best_separation = separation
                 ckpt_dict = {
                     "step": step,
                     "encoder": encoder.state_dict(),
                     "criterion": criterion.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
-                    "val_loss": val_loss,
+                    "separation": separation,
                     "ema_bank": ema_bank.state_dict(),
                 }
                 if use_amp:
                     ckpt_dict["scaler"] = scaler.state_dict()
                 torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "best_model.pt"))
-                print(f"  ** New best model (val_loss={val_loss:.4f}) **")
+                print(f"  ** New best model (separation={separation:.4f}) **")
 
             print(f"{'─' * 60}\n")
 
@@ -778,7 +740,7 @@ def train(config_path, checkpoint=None):
                 "criterion": criterion.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
-                "val_loss": best_val_loss,
+                "separation": best_separation,
                 "ema_bank": ema_bank.state_dict(),
             }
             if use_amp:
@@ -794,7 +756,7 @@ def train(config_path, checkpoint=None):
     print(f"  Training complete!")
     print(f"  Total steps: {max_steps}")
     print(f"  Total time:  {total_time/60:.1f}min")
-    print(f"  Best val loss: {best_val_loss:.4f}")
+    print(f"  Best separation: {best_separation:.4f}")
     print("=" * 60)
     writer.close()
 

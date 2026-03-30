@@ -39,8 +39,8 @@ def load_model(checkpoint_path, config_path="config.json", device=None):
     model.eval()
 
     step = ckpt.get("step", "?")
-    val_loss = ckpt.get("val_loss", "?")
-    print(f"Loaded checkpoint: step={step}, val_loss={val_loss}")
+    separation = ckpt.get("separation", ckpt.get("val_loss", "?"))
+    print(f"Loaded checkpoint: step={step}, separation={separation}")
     print(f"Device: {device}")
 
     return model, cfg, device
