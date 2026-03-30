@@ -65,8 +65,6 @@
     "_comment_eval_samples": "Max utterances per speaker during evaluation (fixed 5s segments)",
     "val_interval": 2000,
     "_comment_val_interval": "Run evaluation every N steps",
-    "save_interval": 2000,
-    "_comment_save_interval": "Save checkpoint every N steps",
     "log_interval": 50,
     "_comment_log_interval": "Print training stats and log to TensorBoard every N steps",
     "num_workers": 4,

@@ -412,7 +412,6 @@ def train(config_path, checkpoint=None):
     warmup_steps = cfg.get("warmup_steps", 0)
     val_interval = cfg.get("val_interval", 2000)
     log_interval = cfg.get("log_interval", 50)
-    save_interval = cfg.get("save_interval", val_interval)
     grad_clip = cfg.get("grad_clip", 0)
 
     # EMA config
@@ -523,8 +522,7 @@ def train(config_path, checkpoint=None):
     print(f"  Grad clip:           {grad_clip if grad_clip > 0 else 'disabled'}")
     print(f"  Batch size:          {batch_size} ({cfg['speakers_per_batch']} spk x {cfg['samples_per_speaker']} samp)")
     print(f"  Batches per cycle:   {batches_per_cycle} (before reshuffling speakers)")
-    print(f"  Val every:           {val_interval} steps")
-    print(f"  Save every:          {save_interval} steps")
+    print(f"  Eval every:          {val_interval} steps")
     print(f"  Log every:           {log_interval} steps")
     print(f"  Diag every:          {diag_interval} steps (after EMA warmup: {ema_warmup_steps})")
     print(f"  Train samples:       {len(train_manifest)}")
@@ -714,42 +712,29 @@ def train(config_path, checkpoint=None):
             encoder.train()
             criterion.train()
 
-            if separation > best_separation:
-                best_separation = separation
-                ckpt_dict = {
-                    "step": step,
-                    "encoder": encoder.state_dict(),
-                    "criterion": criterion.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "separation": separation,
-                    "ema_bank": ema_bank.state_dict(),
-                }
-                if use_amp:
-                    ckpt_dict["scaler"] = scaler.state_dict()
-                torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "best_model.pt"))
-                print(f"  ** New best model (separation={separation:.4f}) **")
-
-            print(f"{'─' * 60}\n")
-
-        # Save checkpoint every N steps (keep last N)
-        if step % save_interval == 0:
+            # Save checkpoint at every eval
             ckpt_dict = {
                 "step": step,
                 "encoder": encoder.state_dict(),
                 "criterion": criterion.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
-                "separation": best_separation,
+                "separation": separation,
                 "ema_bank": ema_bank.state_dict(),
             }
             if use_amp:
                 ckpt_dict["scaler"] = scaler.state_dict()
             ckpt_path = os.path.join(cfg["output_dir"], f"checkpoint_step_{step}.pt")
             torch.save(ckpt_dict, ckpt_path)
-            # Also save as latest.pt for easy resume
             torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "latest.pt"))
             manage_checkpoints(cfg["output_dir"], keep_last_n=keep_last_n)
+
+            if separation > best_separation:
+                best_separation = separation
+                torch.save(ckpt_dict, os.path.join(cfg["output_dir"], "best_model.pt"))
+                print(f"  ** New best model (separation={separation:.4f}) **")
+
+            print(f"{'─' * 60}\n")
 
     total_time = time.time() - training_start
     print("=" * 60)
